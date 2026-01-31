@@ -4,7 +4,7 @@ use raydium_amm_swap::{
 };
 use solana_signature::Signature;
 use solana_sdk::pubkey::Pubkey;
-use std::{str::FromStr, time::{Duration, Instant}};
+use std::{str::FromStr, sync::Arc, time::{Duration, Instant}};
 use tokio::time::sleep;
 use tracing::{info, warn, debug};
 
@@ -14,20 +14,32 @@ use crate::{
 };
 
 /// Swap executor that can be reused with different mints
+#[derive(Clone)]
 pub struct SwapExecutor {
-    client: SwapClient,
+    client: Arc<SwapClient>,
     slippage: f64,
 }
 
 impl SwapExecutor {
     /// Create a new SwapExecutor with an initialized client
     pub fn new(client: SwapClient, slippage: f64) -> Self {
+        SwapExecutor {
+            client: Arc::new(client),
+            slippage,
+        }
+    }
+    
+    /// Create from Arc<SwapClient>
+    pub fn from_arc(client: Arc<SwapClient>, slippage: f64) -> Self {
         SwapExecutor { client, slippage }
     }
     
-    /// Update slippage
-    pub fn set_slippage(&mut self, slippage: f64) {
-        self.slippage = slippage;
+    /// Update slippage (creates new executor with updated slippage)
+    pub fn with_slippage(&self, slippage: f64) -> Self {
+        SwapExecutor {
+            client: self.client.clone(),
+            slippage,
+        }
     }
     
     /// Execute a swap with specified mints
@@ -115,7 +127,7 @@ impl SwapExecutor {
         
         // Send notification if configured
         if let Some(notifier) = self.client.notifier() {
-            let message = result.format_for_telegram(self.client.user_wallet().as_deref());
+            let message = result.format_for_telegram(self.client.user_wallet());
             notifier.send_message(&message).await
                 .map_err(|e| warn!("Failed to send Telegram notification: {}", e))
                 .ok();

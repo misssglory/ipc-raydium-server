@@ -46,7 +46,7 @@ impl SwapConfig {
                 .parse()
                 .context("Invalid SLIPPAGE")?,
             telegram_token: env::var("TG_TOKEN").ok(),
-            telegram_chat_id: env::var("CHAT_ID").ok(),
+            telegram_chat_id: env::var("TG_CHAT_ID").ok(),
             user_wallet: env::var("USER_WALLET").ok(),
         })
     }

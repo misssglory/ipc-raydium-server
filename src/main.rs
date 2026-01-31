@@ -1,16 +1,14 @@
 use ipc_server_rs::SwapExecutor;
+use ipc_server_rs::{client::SwapClient, config::SwapConfig};
 use serde::{Deserialize, Serialize};
 use solana_program::pubkey::Pubkey;
 use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{error, info};
-use ipc_server_rs::{
-    config::SwapConfig,
-    client::SwapClient
-};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IpcRequest {
@@ -49,7 +47,7 @@ impl IpcResponse {
 
 /// Extracts SPL token addresses from text
 /// Returns Some(address) if exactly one valid address is found, None otherwise
-fn extract_spl_token_address(text: &str, executor: &SwapExecutor) -> Option<String> {
+async fn extract_spl_token_address(text: &str, state: Arc<AppState>) -> Option<String> {
     // Patterns to look for SPL token addresses
     let patterns = [
         // Base58 encoded addresses (44-45 chars)
@@ -65,16 +63,24 @@ fn extract_spl_token_address(text: &str, executor: &SwapExecutor) -> Option<Stri
         for capture in re.find_iter(text) {
             let potential_addr = capture.as_str();
 
-            if Pubkey::from_str(potential_addr).is_ok() {
-                found_addresses.push(potential_addr.to_string());
+            if let Ok(pubkey) = Pubkey::from_str(potential_addr) {
+                found_addresses.push(pubkey);
             }
         }
     }
 
     match found_addresses.len() {
         1 => {
-            executor.execute_swap(input);
-            Some(found_addresses[0].clone()),
+            let result = state
+                .executor
+                .execute_swap(
+                    state.config.input_mint,
+                    found_addresses[0],
+                    state.config.amount_in,
+                )
+                .await;
+            info!("{:?}", result);
+            Some(found_addresses[0].to_string())
         }
         _ => None,
     }
@@ -82,8 +88,7 @@ fn extract_spl_token_address(text: &str, executor: &SwapExecutor) -> Option<Stri
 
 async fn handle_client(
     mut socket: tokio::net::UnixStream,
-    executor: &SwapExecutor,
-    config: &SwapConfig
+    state: Arc<AppState>,
 ) -> Result<(), Box<dyn Error>> {
     let (read_half, mut write_half) = socket.split();
     let mut reader = BufReader::new(read_half);
@@ -108,7 +113,7 @@ async fn handle_client(
                 };
 
                 // Extract SPL token address
-                let token_address = extract_spl_token_address(&request.message, executor);
+                let token_address = extract_spl_token_address(&request.message, state.clone()).await;
                 info!("Token address: {:?}", token_address);
 
                 // Send response
@@ -125,6 +130,11 @@ async fn handle_client(
     }
 
     Ok(())
+}
+
+struct AppState {
+    executor: Arc<SwapExecutor>,
+    config: Arc<SwapConfig>,
 }
 
 #[tokio::main]
@@ -148,6 +158,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let executor = SwapExecutor::new(client, config.slippage);
 
+    let state = Arc::new(AppState {
+        executor: Arc::new(executor),
+        // config: config.clone(), // Clone config for sharing
+        config: Arc::new(config),
+    });
+
     // Bind to Unix socket
     let listener = UnixListener::bind(socket_path)?;
     info!("IPC server listening on {}", socket_path);
@@ -158,8 +174,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok((socket, _addr)) => {
                 info!("New client connected");
 
+                let state = state.clone();
+
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(socket, &executor, &config).await {
+                    if let Err(e) = handle_client(socket, state).await {
                         error!("Error handling client: {}", e);
                     }
                 });
