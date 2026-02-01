@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use raydium_amm_swap::amm::client::AmmSwapClient;
-use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::{nonblocking::rpc_client::RpcClient, rpc_config::CommitmentConfig};
 use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, read_keypair_file},
@@ -35,7 +35,7 @@ impl SwapClient {
             .context("No RPC endpoints provided")?
             .clone();
 
-        let rpc_client = RpcClient::new(rpc_url);
+        let rpc_client = RpcClient::new_with_commitment(rpc_url, config.commitment_config);
 
         // Load keypair
         let keypair = read_keypair_file(&config.keypair)
@@ -60,7 +60,7 @@ impl SwapClient {
             .first()
             .context("No RPC endpoints provided")?
             .clone();
-        let rpc_client = RpcClient::new(rpc_url);
+        let rpc_client = RpcClient::new_with_commitment(rpc_url, config.commitment_config);
 
         // Load keypair
         let kp = read_keypair_file(&config.keypair)
