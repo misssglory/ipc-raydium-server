@@ -1,19 +1,21 @@
 use anyhow::{Context, Result};
 use dotenv::dotenv;
+use raydium_amm_swap::consts::SOL_MINT;
 use solana_program::pubkey::Pubkey;
 use std::{env, str::FromStr};
+use anyhow::anyhow;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct SwapConfig {
     pub rpc_endpoints: Vec<String>,
-    pub keypair_path: String,
+    pub keypair: String,
     pub input_mint: Pubkey,
     pub output_mint: Pubkey,
     pub amount_in: u64,
     pub slippage: f64,
     pub telegram_token: Option<String>,
     pub telegram_chat_id: Option<String>,
-    pub user_wallet: Option<String>, // For tracking
 }
 
 impl SwapConfig {
@@ -26,16 +28,18 @@ impl SwapConfig {
             .map(|s| s.trim().to_string())
             .collect();
 
+        let keypair = env::var("KEYPAIR_PATH").context("KEYPAIR_PATH not set")?;
+
         Ok(SwapConfig {
             rpc_endpoints,
-            keypair_path: env::var("KEYPAIR_PATH").context("KEYPAIR_PATH not set")?,
+            keypair: keypair,
             input_mint: Pubkey::from_str(
                 &env::var("INPUT_MINT")
-                    .unwrap_or_else(|_| "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()),
+                    .unwrap_or_else(|_| SOL_MINT.to_string()),
             )?,
             output_mint: Pubkey::from_str(
                 &env::var("OUTPUT_MINT")
-                    .context("OUTPUT_MINT must be provided")?,
+                    .unwrap_or_else(|_| "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()),
             )?,
             amount_in: env::var("AMOUNT_IN")
                 .unwrap_or_else(|_| "1000000".to_string())
@@ -47,31 +51,36 @@ impl SwapConfig {
                 .context("Invalid SLIPPAGE")?,
             telegram_token: env::var("TG_TOKEN").ok(),
             telegram_chat_id: env::var("TG_CHAT_ID").ok(),
-            user_wallet: env::var("USER_WALLET").ok(),
         })
     }
 
     pub fn from_params(
         rpc_endpoints: Vec<String>,
-        keypair_path: String,
+        keypair: String,
         input_mint: Pubkey,
         output_mint: Pubkey,
         amount_in: u64,
         slippage: f64,
         telegram_token: Option<String>,
         telegram_chat_id: Option<String>,
-        user_wallet: Option<String>,
     ) -> Self {
         SwapConfig {
             rpc_endpoints,
-            keypair_path,
+            keypair,
             input_mint,
             output_mint,
             amount_in,
             slippage,
             telegram_token,
             telegram_chat_id,
-            user_wallet,
         }
+    }
+
+    pub fn change_direction(&mut self, amount_in: u64) {
+        std::mem::swap(& mut self.input_mint, &mut self.output_mint);
+        self.amount_in = amount_in;
+        // let temp = self.input_mint;
+        // self.input_mint = self.output_mint;
+        // self.output_mint = temp;
     }
 }

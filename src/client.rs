@@ -19,9 +19,8 @@ pub struct SwapClient {
 struct SwapClientInner {
     rpc_client: RpcClient,
     amm_client: AmmSwapClient,
-    keypair: Keypair,
+    kp: Keypair,
     notifier: Option<TelegramNotifier>,
-    user_wallet: Option<String>,
 }
 
 impl SwapClient {
@@ -39,7 +38,7 @@ impl SwapClient {
         let rpc_client = RpcClient::new(rpc_url);
 
         // Load keypair
-        let keypair = read_keypair_file(&config.keypair_path)
+        let keypair = read_keypair_file(&config.keypair)
             .map_err(|e| anyhow!("Failed to read keypair file: {}", e))?;
 
         // info!("Loaded keypair: {}", keypair.pubkey());
@@ -64,16 +63,15 @@ impl SwapClient {
         let rpc_client = RpcClient::new(rpc_url);
 
         // Load keypair
-        let keypair = read_keypair_file(&config.keypair_path)
+        let kp = read_keypair_file(&config.keypair)
             .map_err(|e| anyhow!("Failed to read keypair file: {}", e))?;
 
         Ok(SwapClient {
             inner: Arc::new(SwapClientInner {
                 rpc_client,
                 amm_client,
-                keypair,
+                kp,
                 notifier,
-                user_wallet: config.user_wallet.clone(),
             }),
         })
     }
@@ -90,13 +88,13 @@ impl SwapClient {
 
     /// Get a reference to the keypair
     pub fn keypair(&self) -> &Keypair {
-        &self.inner.keypair
+        &self.inner.kp
     }
 
     /// Get the user wallet address
-    pub fn user_wallet(&self) -> Option<&str> {
-        self.inner.user_wallet.as_deref()
-    }
+    // pub fn user_wallet(&self) -> Option<&str> {
+    //     self.inner.user_wallet.as_deref()
+    // }
 
     /// Get the Telegram notifier (if configured)
     pub fn notifier(&self) -> Option<&TelegramNotifier> {
@@ -113,4 +111,5 @@ impl SwapClient {
             "Changing RPC endpoint requires recreating SwapClient"
         ))
     }
+
 }

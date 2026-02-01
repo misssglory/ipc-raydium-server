@@ -6,6 +6,7 @@ use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{error, info};
@@ -45,16 +46,13 @@ impl IpcResponse {
     }
 }
 
-/// Extracts SPL token addresses from text
-/// Returns Some(address) if exactly one valid address is found, None otherwise
-async fn extract_spl_token_address(text: &str, state: Arc<AppState>) -> Option<String> {
-    // Patterns to look for SPL token addresses
-    let patterns = [
-        // Base58 encoded addresses (44-45 chars)
-        r"[1-9A-HJ-NP-Za-km-z]{43,44}",
-        // Hexadecimal addresses with 0x prefix
-        // r"0x[a-fA-F0-9]{64}",
-    ];
+async fn extract_spl_token_address(
+    text: &str,
+    // state: Arc<AppState>,
+    executor: Arc<SwapExecutor>,
+    first_conn: bool,
+) -> Option<String> {
+    let patterns = [r"[1-9A-HJ-NP-Za-km-z]{43,44}"];
 
     let mut found_addresses = Vec::new();
 
@@ -65,21 +63,28 @@ async fn extract_spl_token_address(text: &str, state: Arc<AppState>) -> Option<S
 
             if let Ok(pubkey) = Pubkey::from_str(potential_addr) {
                 found_addresses.push(pubkey);
+                break;
             }
         }
     }
 
     match found_addresses.len() {
         1 => {
-            let result = state
-                .executor
-                .execute_swap(
-                    state.config.input_mint,
-                    found_addresses[0],
-                    state.config.amount_in,
-                )
-                .await;
-            info!("{:?}", result);
+            // let result = executor
+            //     .execute_swap(
+            //         // state.config.input_mint,
+            //         // found_addresses[0],
+            //         // state.config.amount_in,
+            //     )
+            //     .await;
+            // let first_address = Some(&found_addresses[0].to_string());
+            if first_conn {
+                let sleep_millis = 0;
+                let result = executor
+                    .execute_round_trip_with_notification(None, found_addresses.first(), sleep_millis)
+                    .await;
+                info!("{:?}", result);
+            }
             Some(found_addresses[0].to_string())
         }
         _ => None,
@@ -88,7 +93,9 @@ async fn extract_spl_token_address(text: &str, state: Arc<AppState>) -> Option<S
 
 async fn handle_client(
     mut socket: tokio::net::UnixStream,
-    state: Arc<AppState>,
+    // state: Arc<AppState>,
+    executor: Arc<SwapExecutor>,
+    first_conn: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (read_half, mut write_half) = socket.split();
     let mut reader = BufReader::new(read_half);
@@ -113,7 +120,8 @@ async fn handle_client(
                 };
 
                 // Extract SPL token address
-                let token_address = extract_spl_token_address(&request.message, state.clone()).await;
+                let token_address =
+                    extract_spl_token_address(&request.message, executor.clone(), first_conn).await;
                 info!("Token address: {:?}", token_address);
 
                 // Send response
@@ -156,30 +164,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // config.output_mint = Pubkey::from_str(output_mint)?;
     let client = SwapClient::new(&config).await?;
 
-    let executor = SwapExecutor::new(client, config.slippage);
+    let executor = Arc::new(SwapExecutor::new(client, config));
 
-    let state = Arc::new(AppState {
-        executor: Arc::new(executor),
-        // config: config.clone(), // Clone config for sharing
-        config: Arc::new(config),
-    });
+    // let state = Arc::new(AppState {
+    //     executor: Arc::new(executor),
+    //     // config: config.clone(), // Clone config for sharing
+    //     config: Arc::new(config),
+    // });
 
     // Bind to Unix socket
     let listener = UnixListener::bind(socket_path)?;
     info!("IPC server listening on {}", socket_path);
 
+    let is_first_connection = Arc::new(AtomicBool::new(true));
     // Accept connections
     loop {
         match listener.accept().await {
             Ok((socket, _addr)) => {
                 info!("New client connected");
 
-                let state = state.clone();
+                // let state = state.clone();
+                let executor = executor.clone();
+                let is_first_connection = is_first_connection.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(socket, state).await {
+                    // let first_conn = is_first_connection.load(Ordering::SeqCst);
+                    let first_conn = is_first_connection.swap(false, Ordering::SeqCst);
+                    info!("First conn: {}", first_conn);
+
+                    if let Err(e) = handle_client(socket, executor, first_conn).await {
                         error!("Error handling client: {}", e);
                     }
+                    // if first_conn {
+                    //     is_first_connection.store(false, Ordering::SeqCst);
+                    // }
                 });
             }
             Err(e) => {

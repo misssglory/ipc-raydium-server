@@ -1,12 +1,13 @@
 use anyhow::Result;
-use solana_signature::Signature;
 use solana_sdk::pubkey::Pubkey;
+use solana_signature::Signature;
 
 #[derive(Debug, Clone)]
 pub struct SwapResult {
     pub signature: Signature,
     pub input_mint: Pubkey,
     pub output_mint: Pubkey,
+    pub pool_id: Pubkey,
     pub amount_in: u64,
     pub estimated_amount_out: u64,
     pub jupiter_link: String,
@@ -19,6 +20,7 @@ impl SwapResult {
         signature: Signature,
         input_mint: Pubkey,
         output_mint: Pubkey,
+        pool_id: Pubkey,
         amount_in: u64,
         estimated_amount_out: u64,
     ) -> Self {
@@ -27,11 +29,12 @@ impl SwapResult {
             "https://explorer.solana.com/tx/{}?cluster=mainnet-beta",
             signature
         );
-        
+
         SwapResult {
             signature,
             input_mint,
             output_mint,
+            pool_id, 
             amount_in,
             estimated_amount_out,
             jupiter_link,
@@ -39,32 +42,39 @@ impl SwapResult {
             timestamp: chrono::Utc::now(),
         }
     }
-    
-    pub fn format_for_telegram(&self, user_wallet: Option<&str>) -> String {
-        let wallet_info = user_wallet
-            .map(|w| format!("👛 Wallet: `{}`\n", w))
-            .unwrap_or_default();
-            
+
+    pub fn format_for_telegram(
+        &self,
+        // user_wallet: Option<&str>
+    ) -> String {
+        // let wallet_info = user_wallet
+        //     .map(|w| format!("👛 Wallet: `{}`\n", w))
+        //     .unwrap_or_default();
+
         format!(
             "✅ *Swap Executed Successfully!*\n\n\
-            {}\
-            📊 *Transaction Details:*\n\
-            • Signature: `{}`\n\
-            • Input: {} tokens of `{}`\n\
-            • Output: ~{} tokens of `{}`\n\
+            📊 *Transaction Details:*\n\n\
+            • Signature: `{}`\n\n\
+            • Input: {} tokens of `{}`\n\n\
+            • Output: ~{} tokens of `{}`\n\n\
+            • Pool ID : `{}`\n\n\
             • Time: {}\n\n\
             🔗 *Links:*\n\
+            • [Token on Raydium]({})\n\
+            • [Token on Jupiter]({})\n\
             • [View on Explorer]({})\n\
-            • [Token on Jupiter]({})",
-            wallet_info,
+            ",
+            // wallet_info,
             self.signature,
             self.amount_in,
             self.input_mint,
             self.estimated_amount_out,
             self.output_mint,
+            self.pool_id, 
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
+            format!("https://raydium.io/swap/?inputMint={}&outputMint={}", self.output_mint, self.input_mint),
+            self.jupiter_link,
             self.explorer_link,
-            self.jupiter_link
         )
     }
 }

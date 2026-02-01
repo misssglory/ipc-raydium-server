@@ -1,154 +1,406 @@
 use anyhow::{Context, Result, anyhow};
 use raydium_amm_swap::{
+    consts::SOL_MINT,
     interface::{AmmPool, PoolKeys, PoolType},
 };
-use solana_signature::Signature;
-use solana_sdk::pubkey::Pubkey;
-use std::{str::FromStr, sync::Arc, time::{Duration, Instant}};
-use tokio::time::sleep;
-use tracing::{info, warn, debug};
-
-use crate::{
-    client::SwapClient,
-    types::SwapResult,
+// use solana_client_helpers::ClientResult;
+use solana_client::{
+    // ClientResult,
+    client_error::{ClientError, ClientErrorKind},
+    rpc_request::Address,
+    rpc_response::UiTokenAmount,
 };
+use solana_sdk::{message::Message, pubkey::Pubkey, signature::Signer, transaction::Transaction};
+use solana_signature::Signature;
+use std::{
+    str::FromStr,
+    sync::{
+        Arc,
+        //  RwLock
+    },
+    time::{Duration, Instant},
+};
+use tokio::{sync::RwLock, task, time::sleep};
+use tracing::{debug, error, info, warn};
 
+use crate::{client::SwapClient, config::SwapConfig, types::SwapResult};
+use spl_associated_token_account::{
+    get_associated_token_address, instruction::create_associated_token_account,
+};
+use spl_token::{ID as TOKEN_PROGRAM_ID, instruction::initialize_account};
 /// Swap executor that can be reused with different mints
 #[derive(Clone)]
 pub struct SwapExecutor {
     client: Arc<SwapClient>,
-    slippage: f64,
+    config: Arc<RwLock<SwapConfig>>,
 }
 
 impl SwapExecutor {
-    /// Create a new SwapExecutor with an initialized client
-    pub fn new(client: SwapClient, slippage: f64) -> Self {
+    pub fn new(client: SwapClient, config: SwapConfig) -> Self {
         SwapExecutor {
             client: Arc::new(client),
-            slippage,
+            config: Arc::new(RwLock::new(config)),
         }
     }
-    
-    /// Create from Arc<SwapClient>
-    pub fn from_arc(client: Arc<SwapClient>, slippage: f64) -> Self {
-        SwapExecutor { client, slippage }
+
+    pub fn from_arc(client: Arc<SwapClient>, config: Arc<RwLock<SwapConfig>>) -> Self {
+        SwapExecutor { client, config }
     }
-    
-    /// Update slippage (creates new executor with updated slippage)
-    pub fn with_slippage(&self, slippage: f64) -> Self {
-        SwapExecutor {
-            client: self.client.clone(),
-            slippage,
-        }
-    }
-    
-    /// Execute a swap with specified mints
+
     pub async fn execute_swap(
         &self,
-        input_mint: Pubkey,
-        output_mint: Pubkey,
-        amount_in: u64,
+        input_mint: Option<&Pubkey>,
+        output_mint: Option<&Pubkey>,
+        amount_in: Option<u64>,
+        pool_id: Option<Pubkey>,
     ) -> Result<SwapResult> {
         info!("🚀 Starting swap execution");
+
+        let config = self.config.read().await;
+        // let config = config.clone();
+
+        let input_mint = input_mint.unwrap_or(&config.input_mint);
+        let output_mint = output_mint.unwrap_or(&config.output_mint);
+        let amount_in = amount_in.unwrap_or(config.amount_in);
         info!("Input: {} -> Output: {}", input_mint, output_mint);
-        info!("Amount in: {}, Slippage: {}%", amount_in, self.slippage * 100.0);
-        
-        // Find pool
-        let pool_id = self.find_raydium_pool(&input_mint, &output_mint).await?;
-        
-        // Get pool info
-        let pool_info = self.client.amm_client()
+        info!(
+            "Amount in: {}, Slippage: {}%",
+            amount_in,
+            config.slippage * 100.0
+        );
+
+        let is_input_token = false;
+        let client = self.client.clone();
+        // let output_mint = config.output_mint.clone();
+        let ata_task = task::spawn(SwapExecutor::ensure_ata_exists(
+            client,
+            output_mint.clone(),
+            is_input_token,
+        ));
+
+        let pool_id = pool_id.unwrap_or(self.find_raydium_pool(&input_mint, &output_mint).await?);
+
+        let pool_info = self
+            .client
+            .amm_client()
             .fetch_pool_by_id(&pool_id)
             .await
             .context("Failed to fetch pool by ID")?;
-            
-        let pool_keys: PoolKeys<AmmPool> = self.client.amm_client()
+
+        let pool_keys: PoolKeys<AmmPool> = self
+            .client
+            .amm_client()
             .fetch_pools_keys_by_id(&pool_id)
             .await
             .context("Failed to fetch pool keys")?;
-            
-        let rpc_data = self.client.amm_client()
+
+        let rpc_data = self
+            .client
+            .amm_client()
             .get_rpc_pool_info(&pool_id)
             .await
             .context("Failed to get RPC pool info")?;
-            
+
         let pool = pool_info
             .data
             .first()
             .ok_or_else(|| anyhow!("No pool data found"))?;
-            
-        // Calculate output amount
-        let compute_result = self.client.amm_client()
-            .compute_amount_out(&rpc_data, pool, amount_in, self.slippage)
-            .context("Failed to compute amount out")?;
-            
-        let amount_out = compute_result.min_amount_out;
-        
+
+        let mut amount_out = 0;
+        if config.slippage < 1.0 {
+            let compute_result = self
+                .client
+                .amm_client()
+                .compute_amount_out(&rpc_data, pool, amount_in, config.slippage)
+                .context("Failed to compute amount out")?;
+            amount_out = compute_result.min_amount_out;
+        }
+
         info!("Swap parameters:");
         info!("  Input amount: {}", amount_in);
         info!("  Minimum output: {}", amount_out);
-        
-        // Execute swap
+
         let key = pool_keys
             .data
             .first()
             .ok_or_else(|| anyhow!("No pool key found"))?;
-            
-        let input_mint_str = input_mint.to_string();
-        let output_mint_str = output_mint.to_string();
-        let mint_a_addr = solana_address::Address::from_str_const(&input_mint_str);
-        let mint_b_addr = solana_address::Address::from_str_const(&output_mint_str);
-        
+
+        // let input_mint_str = self.config.input_mint.to_string();
+        // let output_mint_str = self.config.output_mint.to_string();
+        // let mint_a_addr = solana_address::Address::from_str_const(&input_mint_str);
+        // let mint_b_addr = solana_address::Address::from_str_const(&output_mint_str);
+        // match ata_task.await {
+        //     Ok(ata) => {
+        //         info!("ATA ensured: {}", ata);
+        //     }
+        //     Err(err) => {
+        //         error!("ATA error: {}", err);
+        //     }
+        // }
+        ata_task.await.expect("ATA error");
+
         info!("Sending swap transaction...");
-        let signature = self.client.amm_client()
-            .swap_amm(
-                key,
-                &mint_a_addr,
-                &mint_b_addr,
-                amount_in,
-                amount_out,
-            )
+        // let signature = self
+        //     .client
+        //     .amm_client()
+        //     .swap_amm(key, &input_mint, &output_mint, amount_in, amount_out)
+        //     .await
+        //     .context("Failed to execute swap")?;
+        match self
+            .client
+            .amm_client()
+            .swap_amm(key, &input_mint, &output_mint, amount_in, amount_out)
             .await
-            .context("Failed to execute swap")?;
-            
-        info!("Transaction sent: {}", signature);
-        
-        // Wait for confirmation
-        self.wait_for_confirmation(&signature).await?;
-        
-        // Create result
-        let result = SwapResult::new(
-            signature,
-            input_mint,
-            output_mint,
-            amount_in,
-            amount_out,
-        );
-        
-        // Send notification if configured
-        if let Some(notifier) = self.client.notifier() {
-            let message = result.format_for_telegram(self.client.user_wallet());
-            notifier.send_message(&message).await
+        {
+            Ok(signature) => {
+                info!("Transaction sent: {}", signature);
+
+                let result = SwapResult::new(
+                    signature,
+                    input_mint.clone(),
+                    output_mint.clone(),
+                    pool_id,
+                    amount_in,
+                    amount_out,
+                );
+
+                Ok(result)
+            }
+            Err(err) => {
+                // error!("Swap error: {}", err);
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn notify_swap(client: Arc<SwapClient>, result: Arc<SwapResult>) -> Result<()> {
+        // self.wait_for_confirmation(&result.signature).await?;
+
+        if let Some(notifier) = client.notifier() {
+            let message = result.format_for_telegram();
+            notifier
+                .send_message(&message)
+                .await
                 .map_err(|e| warn!("Failed to send Telegram notification: {}", e))
                 .ok();
         }
-        
-        Ok(result)
+
+        Ok(())
     }
-    
-    async fn find_raydium_pool(
-        &self,
-        input_mint: &Pubkey,
-        output_mint: &Pubkey,
-    ) -> Result<Pubkey> {
+
+    /// Ensure ATA exists or create it with retry logic
+    async fn ensure_ata_exists(
+        // &self,
+        // config: SwapConfig,
+        client: Arc<SwapClient>,
+        // owner: &Keypair,
+        mint: Pubkey,
+        is_input_token: bool,
+    ) -> Result<
+        Pubkey,
+        // ClientError
+    > {
         let start = Instant::now();
-        
+
+        // let config = config.read().await;
+        let pk = client.keypair().pubkey();
+        let ata = get_associated_token_address(&pk, &mint);
+        info!("Checking ATA: {}", ata);
+
+        // Check if ATA exists
+        match client.rpc_client().get_account(&ata).await {
+            Ok(_) => {
+                let elapsed = start.elapsed();
+                info!("ATA already exists, checked in {} ms", elapsed.as_millis());
+                return Ok(ata);
+            }
+            Err(_) => {
+                info!("Creating new ATA...");
+            }
+        }
+
+        // Create ATA instruction
+        let create_ata_ix = create_associated_token_account(&pk, &pk, &mint, &TOKEN_PROGRAM_ID);
+
+        let mut instructions = vec![create_ata_ix];
+
+        // If this is SOL (wrapped SOL input), we need to initialize it
+        if is_input_token && mint.to_string() == SOL_MINT {
+            let initialize_ix = initialize_account(&TOKEN_PROGRAM_ID, &ata, &mint, &pk)?;
+            instructions.push(initialize_ix);
+        }
+
+        // Add priority fee for faster inclusion
+        // let priority_fee_ix = ComputeBudgetInstruction::set_compute_unit_price(25_000);
+        // instructions.insert(0, priority_fee_ix);
+
+        // Execute with retry logic
+        let mut retries = 3;
+
+        while retries > 0 {
+            let blockhash = client.rpc_client().get_latest_blockhash().await;
+            // .context("Failed to get blockhash")?;
+
+            let message = Message::new(&instructions, Some(&pk));
+            let mut tx = Transaction::new_unsigned(message);
+
+            if let Ok(bh) = blockhash {
+                tx.try_sign(&[client.keypair()], bh)?;
+            } else {
+                // ClientError::new_with_request(ClientErrorKind::SigningError(()), request)
+                return Err(anyhow!("Create ATA sign error"));
+            }
+
+            match client.rpc_client().send_and_confirm_transaction(&tx).await {
+                Ok(sig) => {
+                    let elapsed = start.elapsed();
+                    info!(
+                        "ATA created successfully in {} ms, signature: {}",
+                        elapsed.as_millis(),
+                        sig
+                    );
+                    return Ok(ata);
+                }
+                Err(e) => {
+                    retries -= 1;
+                    warn!(
+                        "ATA creation failed, retries left: {}, error: {}",
+                        retries, e
+                    );
+                    if retries > 0 {
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                    // else {
+                    // e
+                    // ClientError(e)
+                    // }
+                }
+            }
+        }
+
+        Err(anyhow!("Failed to create ATA after retries"))
+        // ClientError::new_with_request(kind, request)
+    }
+
+    pub async fn check_balance(&self, mint: &Address) -> Result<u64> {
+        let balance_start = Instant::now();
+
+        // let is_input_token = false;
+        //TODO: Check ATA without creation
+        // let owner_ata_input = self.ensure_ata_exists(mint, is_input_token).await;
+        // let config = self.config.read().unwrap();
+        let ata = get_associated_token_address(&self.client.keypair().pubkey(), mint);
+        let account_info = self.client.rpc_client().get_account(&ata).await;
+        // let token_account: Account = spl_token::state::Account::unpack_from_slice(&account_info.data)?;
+
+        if let Ok(acc) = account_info {
+            info!(
+                "Balance check: {}. In {} ms",
+                acc.lamports,
+                balance_start.elapsed().as_millis(),
+            );
+            return Ok(acc.lamports);
+        }
+        // if let Ok(owner_ata_input) = owner_ata_input {
+        //     let balance_response = self
+        //         .client
+        //         .rpc_client()
+        //         .get_token_account_balance(&owner_ata_input)
+        //         .await;
+        //     // balance_response
+        //     if let Ok(balance) = balance_response {
+        //         info!(
+        //             "Check balance executed in {} ms",
+        //             balance_start.elapsed().as_millis()
+        //         );
+        //         return Ok(balance);
+        //     }
+        //     // debug!("Balance: {}", balance_response);
+        //     // if let Ok(balance) = balance_response {
+        //     //     info!("Input token balance: {}", balance.ui_amount_string);
+        //     //     if balance.amount.parse::<u64>().unwrap_or(0) < self.config.amount_in {
+        //     //         return Err(anyhow!("Insufficient balance for swap"));
+        //     //     }
+        //     // }
+        // } else {
+        // return Err(anyhow!("Check balance error"));
+        // Err(ClientError(()))
+        // ClientError()
+        // }
+        Err(anyhow!("Check balance owner ATA error"))
+    }
+
+    pub async fn execute_round_trip_with_notification(
+        &self,
+        input_mint: Option<&Pubkey>,
+        output_mint: Option<&Pubkey>,
+        sleep_millis: u64,
+    ) -> Result<()> {
+        let config = self.config.read().await;
+        // let input_mint = input_mint.unwrap_or(&config.input_mint);
+        // let output_mint = output_mint.unwrap_or(&config.output_mint);
+        let buy_result = self.execute_swap(input_mint, output_mint, None, None).await;
+
+        if let Ok(buy) = buy_result {
+            let client = self.client.clone();
+            let buy = Arc::new(buy);
+            let notify_buy_task = task::spawn(SwapExecutor::notify_swap(client, buy.clone()));
+
+            if sleep_millis > 0 {
+                let sleep_after_buy = std::time::Duration::from_millis(sleep_millis); // Average block time
+                std::thread::sleep(sleep_after_buy);
+            }
+
+            let config = self.config.read().await;
+            let balance_result = self.check_balance(&config.output_mint).await;
+
+            if let Ok(balance) = balance_result {
+                // std::mem::swap(&mut self.config.input_mint, &mut self.config.output_mint);
+                // {
+                //     let mut config = self.config.write().await;
+                //     config.change_direction(balance);
+                // }
+                let buy = buy.clone();
+                let sell_result = self
+                    .execute_swap(
+                        Some(&buy.output_mint),
+                        Some(&buy.input_mint),
+                        Some(balance),
+                        Some(buy.pool_id),
+                    )
+                    .await;
+                // if let Ok(sell) = sell_result {
+                // }
+
+                notify_buy_task.await;
+                match sell_result {
+                    Ok(sell) => {
+                        let client = self.client.clone();
+                        SwapExecutor::notify_swap(client, Arc::new(sell)).await;
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        return Err(anyhow!("Round trip sell error: {}", err));
+                    }
+                }
+                // return Err(anyhow!("Round trip sell error"));
+            }
+            return Err(anyhow!("Round trip balance error"));
+        }
+        Err(anyhow!("Round trip buy error"))
+    }
+
+    async fn find_raydium_pool(&self, input_mint: &Pubkey, output_mint: &Pubkey) -> Result<Pubkey> {
+        let start = Instant::now();
+
         info!(
             "Searching for pool with mints: {} -> {}",
             input_mint, output_mint
         );
-        
-        let all_mint_pools = self.client.amm_client()
+
+        let all_mint_pools = self
+            .client
+            .amm_client()
             .fetch_pool_info(
                 &input_mint.to_string(),
                 &output_mint.to_string(),
@@ -160,42 +412,49 @@ impl SwapExecutor {
             )
             .await
             .context("Failed to fetch pool info")?;
-            
+
         let elapsed = start.elapsed();
         info!("Pool search completed in {} ms", elapsed.as_millis());
-        
+
         if all_mint_pools.is_empty() {
             return Err(anyhow!("No Raydium pool found for token pair"));
         }
-        
+
         let first_pool = all_mint_pools.first().unwrap();
-        let pool_id = Pubkey::from_str(&first_pool.id)
-            .context("Failed to parse pool ID")?;
-            
+        let pool_id = Pubkey::from_str(&first_pool.id).context("Failed to parse pool ID")?;
+
         info!("Found pool: {}", pool_id);
         Ok(pool_id)
     }
-    
+
     async fn wait_for_confirmation(&self, signature: &Signature) -> Result<()> {
         let timeout = Duration::from_secs(30);
         let start = Instant::now();
-        
+
         info!("Waiting for transaction confirmation...");
-        
+
         while start.elapsed() < timeout {
-            match self.client.rpc_client().get_signature_status(signature).await {
+            match self
+                .client
+                .rpc_client()
+                .get_signature_status(signature)
+                .await
+            {
                 Ok(Some(_)) => {
-                    info!("Transaction confirmed in {} ms", start.elapsed().as_millis());
+                    info!(
+                        "Transaction confirmed in {} ms",
+                        start.elapsed().as_millis()
+                    );
                     return Ok(());
                 }
                 _ => sleep(Duration::from_millis(500)).await,
             }
         }
-        
+
         warn!("Transaction not confirmed within timeout");
         Ok(())
     }
-    
+
     /// Get quote for a swap (without executing)
     pub async fn get_quote(
         &self,
@@ -204,28 +463,39 @@ impl SwapExecutor {
         amount_in: u64,
     ) -> Result<u64> {
         info!("Getting quote for swap");
-        
+
         let pool_id = self.find_raydium_pool(&input_mint, &output_mint).await?;
-        
-        let pool_info = self.client.amm_client()
+
+        let pool_info = self
+            .client
+            .amm_client()
             .fetch_pool_by_id(&pool_id)
             .await
             .context("Failed to fetch pool by ID")?;
-            
-        let rpc_data = self.client.amm_client()
+
+        let rpc_data = self
+            .client
+            .amm_client()
             .get_rpc_pool_info(&pool_id)
             .await
             .context("Failed to get RPC pool info")?;
-            
+
         let pool = pool_info
             .data
             .first()
             .ok_or_else(|| anyhow!("No pool data found"))?;
-            
-        let compute_result = self.client.amm_client()
-            .compute_amount_out(&rpc_data, pool, amount_in, self.slippage)
+
+        let compute_result = self
+            .client
+            .amm_client()
+            .compute_amount_out(
+                &rpc_data,
+                pool,
+                amount_in,
+                self.config.read().await.slippage,
+            )
             .context("Failed to compute amount out")?;
-            
+
         Ok(compute_result.min_amount_out)
     }
 }
