@@ -3,6 +3,7 @@ pub mod swap;
 pub mod telegram;
 pub mod types;
 pub mod client;
+pub mod holders_fetcher;
 
 pub use config::*;
 pub use swap::*;

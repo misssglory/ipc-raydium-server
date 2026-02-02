@@ -19,6 +19,8 @@ pub struct SwapConfig {
   pub telegram_token: Option<String>,
   pub telegram_chat_id: Option<String>,
   pub commitment_config: CommitmentConfig,
+  pub min_profit_percent: f64,
+  pub stop_loss_percent: f64,
 }
 
 impl SwapConfig {
@@ -76,6 +78,8 @@ impl SwapConfig {
       telegram_token: env::var("TG_TOKEN").ok(),
       telegram_chat_id: env::var("TG_CHAT_ID").ok(),
       commitment_config,
+      min_profit_percent: 10.0,
+      stop_loss_percent: 10.0,
     })
   }
 
@@ -100,6 +104,8 @@ impl SwapConfig {
       telegram_token,
       telegram_chat_id,
       commitment_config,
+      min_profit_percent: 10.0,
+      stop_loss_percent: 10.0,
     }
   }
 
