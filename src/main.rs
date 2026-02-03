@@ -164,11 +164,12 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+  let mut config = SwapConfig::from_env()?;
   tracing_subscriber::fmt()
     .with_target(false)
     // .with_timer(tracing_subscriber::fmt::time::uptime())
     .with_level(false)
-    .with_max_level(tracing::Level::DEBUG)
+    .with_max_level(config.log_level)
     .init();
 
   let socket_path = "/tmp/spl_token_ipc.sock";
@@ -178,7 +179,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     std::fs::remove_file(socket_path)?;
   }
 
-  let mut config = SwapConfig::from_env()?;
   // config.output_mint = Pubkey::from_str(output_mint)?;
   let client = SwapClient::new(&config).await?;
 

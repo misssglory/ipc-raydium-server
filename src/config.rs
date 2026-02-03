@@ -22,6 +22,7 @@ pub struct SwapConfig {
   pub min_profit_percent: f64,
   pub stop_loss_percent: f64,
   pub timelimit_seconds: u64,
+  pub log_level: tracing::Level,
 }
 
 impl SwapConfig {
@@ -50,6 +51,15 @@ impl SwapConfig {
         );
         CommitmentConfig::confirmed()
       }
+    };
+
+    let log_level = match env::var("LOG_LEVEL")
+      .unwrap_or_else(|_| "info".to_string())
+      .as_str() {
+      "warn" => tracing::Level::WARN,
+      "info" => tracing::Level::INFO,
+      "debug" => tracing::Level::DEBUG,
+      _ => tracing::Level::INFO,
     };
 
     let amount_in: u64 = if let Ok(amount_in_str) = env::var("AMOUNT_IN") {
@@ -96,7 +106,7 @@ impl SwapConfig {
         .unwrap_or_else(|_| "13".to_string())
         .parse()
         .context("Invalid timelimit")?,
-
+      log_level: log_level,
     })
   }
 
@@ -124,6 +134,7 @@ impl SwapConfig {
       min_profit_percent: 1.01,
       stop_loss_percent: 1.01,
       timelimit_seconds: 13,
+      log_level: tracing::Level::INFO,
     }
   }
 
