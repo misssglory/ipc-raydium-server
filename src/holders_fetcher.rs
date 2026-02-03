@@ -2,7 +2,7 @@
 // use solana_client::rpc_client::RpcClient;
 use anyhow::anyhow;
 use dotenv::dotenv;
-use solana_account_decoder::UiAccount;
+use solana_account_decoder::{UiAccount, UiAccountData};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::CommitmentConfig;
 use solana_client::rpc_filter::{Memcmp, RpcFilterType};
@@ -14,6 +14,8 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::{Client, NoTls};
 use tracing::{error, info, instrument, warn};
+use spl_token_2022::state::Account as TokenAccount;
+
 
 /// Configuration for database connection
 #[derive(Debug, Clone)]
@@ -32,7 +34,7 @@ impl DbConfig {
       port: env::var("DB_PORT")?.parse()?,
       user: env::var("DB_USER")?,
       name: env::var("DB_NAME")?,
-      password: env::var("DB_PASSWORD")?
+      password: env::var("DB_PASSWORD")?,
     })
   }
 }
@@ -41,6 +43,7 @@ impl DbConfig {
 #[derive(Debug)]
 pub struct TokenHolder {
   owner: String,
+  ata: String,
   mint: String,
   amount: u64,
   last_updated: i64,
@@ -66,7 +69,11 @@ impl TokenHoldersFetcher {
     // Connect to database
     let connection_string = format!(
       "host={} port={} user={} password={} dbname={}",
-      db_config.host, db_config.port, db_config.user, db_config.password, db_config.name
+      db_config.host,
+      db_config.port,
+      db_config.user,
+      db_config.password,
+      db_config.name
     );
 
     let (db_client, connection) =
@@ -160,10 +167,17 @@ impl TokenHoldersFetcher {
     let ts = chrono::Utc::now().timestamp_millis();
 
     for (pubkey, acc) in accounts {
+      let data_bytes = match acc.data {
+        UiAccountData::Binary(data_str, _) => base64::decode(data_str)?,
+        _ => continue, // Skip if data isn't in binary format
+      };
+
+      let token_account = TokenAccount::unpack(&data_bytes)?;
       holders.push(TokenHolder {
-        owner: pubkey.to_string(),
+        owner: token_account.owner.to_string(),
+        ata: pubkey.to_string(),
         mint: mint_address.to_string(),
-        amount: acc.lamports,
+        amount: token_account.amount,
         last_updated: ts,
       });
     }
@@ -185,8 +199,9 @@ impl TokenHoldersFetcher {
         r#"
             CREATE TABLE IF NOT EXISTS token_holders (
                 id SERIAL PRIMARY KEY,
-                owner_address VARCHAR(44) NOT NULL,
-                mint_address VARCHAR(44) NOT NULL,
+                owner VARCHAR(44) NOT NULL,
+                ata VARCHAR(44) NOT NULL,
+                mint VARCHAR(44) NOT NULL,
                 amount BIGINT NOT NULL,
                 last_updated BIGINT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -194,16 +209,16 @@ impl TokenHoldersFetcher {
             );
             
             CREATE INDEX IF NOT EXISTS idx_token_holders_owner 
-            ON token_holders(owner_address);
+            ON token_holders(owner);
             
             CREATE INDEX IF NOT EXISTS idx_token_holders_mint 
-            ON token_holders(mint_address);
+            ON token_holders(mint);
             
             CREATE INDEX IF NOT EXISTS idx_token_holders_owner_mint 
-            ON token_holders(owner_address, mint_address);
+            ON token_holders(owner, mint);
             
             CREATE UNIQUE INDEX IF NOT EXISTS unique_owner_mint 
-            ON token_holders(owner_address, mint_address);
+            ON token_holders(owner, mint);
             "#,
       )
       .await?;
@@ -212,96 +227,14 @@ impl TokenHoldersFetcher {
     Ok(())
   }
 
-  /// Fetch all token holders for a specific mint address
-  //   #[instrument(skip(self))]
-  //   pub async fn fetch_token_holders(
-  //     &self,
-  //     mint_address: &str,
-  //   ) -> Result<(), Box<dyn std::error::Error>> {
-  //     info!("Fetching token holders for mint: {}", mint_address);
-
-  //     let mint_pubkey = match Pubkey::from_str(mint_address) {
-  //       Ok(pubkey) => pubkey,
-  //       Err(e) => {
-  //         error!("Invalid mint address: {}", e);
-  //         return Err(Box::new(e));
-  //       }
-  //     };
-
-  //     // Get token accounts by mint
-  //     // let accounts = self.rpc_client.get_token_accounts_by_owner(
-  //     //     &mint_pubkey,
-  //     //     spl_token::id(),
-  //     //     Some(spl_token::state::Account::LEN as usize),
-  //     // ).await;
-
-  //     info!("Found {} token accounts", accounts.len());
-
-  //     let mut holders = Vec::new();
-  //     let timestamp = SystemTime::now()
-  //       .duration_since(UNIX_EPOCH)
-  //       .expect("Time went backwards")
-  //       .as_secs() as i64;
-
-  //     for (pubkey, account) in accounts {
-  //       if let Ok(token_account) =
-  //         bincode::deserialize::<spl_token::state::Account>(&account.data)
-  //       {
-  //         if token_account.amount > 0 {
-  //           holders.push(TokenHolder {
-  //             owner: token_account.owner.to_string(),
-  //             mint: mint_address.to_string(),
-  //             amount: token_account.amount,
-  //             last_updated: timestamp,
-  //           });
-  //         }
-  //       }
-  //     }
-
-  //     info!("Found {} holders with non-zero balance", holders.len());
-
-  //     // Save to database
-  //     self.save_holders(&holders).await?;
-
-  //     Ok(())
-  //   }
-
-  /// Fetch holders for multiple token mints
-  //   #[instrument(skip(self))]
-  //   pub async fn fetch_multiple_token_holders(
-  //     &self,
-  //     mint_addresses: &[String],
-  //   ) -> Result<(), Box<dyn std::error::Error>> {
-  //     info!("Fetching holders for {} token mints", mint_addresses.len());
-
-  //     for (i, mint_address) in mint_addresses.iter().enumerate() {
-  //       info!(
-  //         "Processing mint {}/{}: {}",
-  //         i + 1,
-  //         mint_addresses.len(),
-  //         mint_address
-  //       );
-
-  //       match self.fetch_token_holders(mint_address).await {
-  //         Ok(_) => info!("Successfully fetched holders for {}", mint_address),
-  //         Err(e) => warn!("Failed to fetch holders for {}: {}", mint_address, e),
-  //       }
-
-  //       // Small delay to avoid rate limiting
-  //       tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-  //     }
-
-  //     info!("Completed fetching holders for all mints");
-  //     Ok(())
-  //   }
-
   /// Save token holders to database
   #[instrument(skip(self, holders))]
   async fn save_holders(
     &mut self,
     holders: &[TokenHolder],
-  ) -> anyhow::Result<(), 
-//   Box<dyn std::error::Error>
+  ) -> anyhow::Result<
+    (),
+    //   Box<dyn std::error::Error>
   > {
     if holders.is_empty() {
       info!("No holders to save");
@@ -315,9 +248,9 @@ impl TokenHoldersFetcher {
     for holder in holders {
       transaction.execute(
                 r#"
-                INSERT INTO token_holders (owner_address, mint_address, amount, last_updated)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (owner_address, mint_address) 
+                INSERT INTO token_holders (owner, mint, amount, last_updated, ata)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (owner, mint) 
                 DO UPDATE SET 
                     amount = EXCLUDED.amount,
                     last_updated = EXCLUDED.last_updated,
@@ -328,6 +261,7 @@ impl TokenHoldersFetcher {
                     &holder.mint,
                     &(holder.amount as i64),
                     &holder.last_updated,
+                    &holder.ata,
                 ],
             ).await?;
     }

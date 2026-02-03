@@ -31,6 +31,7 @@ tokio-postgres = "0.7.16"
 
 spl-token-2022 = { version = "10.0.0", features = ["no-entrypoint"] }  # Added no-entrypoint
 solana-account-decoder = "3.1.8"
+base64 = "0.22.1"
 
 
 [profile.release]
