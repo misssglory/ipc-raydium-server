@@ -5,6 +5,7 @@ pub mod types;
 pub mod client;
 pub mod holders_fetcher;
 pub mod amm;
+pub mod hash_cache;
 
 pub use config::*;
 pub use swap::*;

@@ -91,6 +91,7 @@ impl SwapExecutor {
     output_mint: Option<&Pubkey>,
     amount_in: Option<u64>,
     pool_id: Option<Pubkey>,
+    create_destination_ata: bool,
   ) -> Result<SwapResult> {
     info!("🚀 Starting swap execution");
 
@@ -103,7 +104,6 @@ impl SwapExecutor {
     info!("Input: {} -> Output: {}", input_mint, output_mint);
     info!("Amount in: {}, Slippage: {}%", amount_in, config.slippage * 100.0);
 
-        
     // Check if both mints are WSOL
     // let sol_mint = Pubkey::from_str(SOL_MINT)?;
     // let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?;
@@ -121,9 +121,10 @@ impl SwapExecutor {
     //   output_mint.clone(),
     //   is_input_token,
     // )
-  // );
-  
-  let destination_ata = get_associated_token_address(&client.keypair().pubkey(), &output_mint);
+    // );
+
+    let destination_ata =
+      get_associated_token_address(&client.keypair().pubkey(), &output_mint);
     debug!("Find ATA: {}", destination_ata.to_string());
 
     let pool_id = pool_id
@@ -177,14 +178,33 @@ impl SwapExecutor {
     info!("Sending swap transaction...");
 
     // return Err(anyhow!("test"));
-    let source_ata = get_associated_token_address(&client.keypair().pubkey(), &input_mint);
+    let source_ata =
+      get_associated_token_address(&client.keypair().pubkey(), &input_mint);
     debug!("Source ATA: {}", source_ata.to_string());
     // return Err(anyhow!("test"));
+
+    return Ok(SwapResult::new(
+      Signature::new_unique(),
+      *input_mint,
+      *output_mint,
+      pool_id,
+      amount_in,
+      0,
+    ));
 
     match self
       .client
       .amm_client()
-      .swap_amm(key, &input_mint, &output_mint, amount_in, amount_out, source_ata, destination_ata, true)
+      .swap_amm(
+        key,
+        &input_mint,
+        &output_mint,
+        amount_in,
+        amount_out,
+        source_ata,
+        destination_ata,
+        create_destination_ata,
+      )
       .await
     {
       Ok(signature) => {
@@ -258,19 +278,17 @@ impl SwapExecutor {
     // self.wait_for_confirmation(&result.signature).await?;
 
     if let Some(notifier) = client.notifier() {
-      let message = result.format_for_telegram();
-      notifier
-        .send_message(&message)
-        .await
-        .map_err(|e| warn!("Failed to send Telegram notification: {}", e))
-        .ok();
+      let message = result.format_for_telegram()?;
+      notifier.send_message(&message).await?
+      // .map_err(|e| warn!("Failed to send Telegram notification: {}", e))
+      // .ok();
     }
 
     Ok(())
   }
 
   /// Ensure ATA exists or create it with retry logic
-  
+
   async fn ensure_ata_exists(
     // &self,
     // config: SwapConfig,
@@ -418,24 +436,26 @@ impl SwapExecutor {
     output_mint: Option<&Pubkey>,
     sleep_millis: u64,
   ) -> Result<()> {
-    let config = self.config.read().await;
+    // let config = self.config.read().await;
     // let input_mint = input_mint.unwrap_or(&config.input_mint);
     // let output_mint = output_mint.unwrap_or(&config.output_mint);
     let buy_result =
-      self.execute_swap(input_mint, output_mint, None, None).await;
+      self.execute_swap(input_mint, output_mint, None, None, true).await;
 
     if let Ok(buy) = buy_result {
       let client = self.client.clone();
       let buy = Arc::new(buy);
-      let notify_buy_task =
-        task::spawn(SwapExecutor::notify_swap(client, buy.clone()));
+      // let notify_buy_task =
+      //   task::spawn(SwapExecutor::notify_swap(client, buy.clone()));
+      let notify_buy_result =
+        SwapExecutor::notify_swap(client, buy.clone()).await?;
 
       if sleep_millis > 0 {
         let sleep_after_buy = std::time::Duration::from_millis(sleep_millis); // Average block time
         std::thread::sleep(sleep_after_buy);
       }
 
-      let config = self.config.read().await;
+      // let config = self.config.read().await;
 
       // let balance = 1;
       // while balance > 0 { }
@@ -456,12 +476,13 @@ impl SwapExecutor {
           Some(&buy.input_mint),
           Some(balance),
           Some(buy.pool_id),
+          false,
         )
         .await;
       // if let Ok(sell) = sell_result {
       // }
 
-      notify_buy_task.await;
+      // notify_buy_task.await;
       match sell_result {
         Ok(sell) => {
           let client = self.client.clone();

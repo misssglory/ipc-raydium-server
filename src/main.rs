@@ -1,4 +1,5 @@
 use ipc_server_rs::SwapExecutor;
+use ipc_server_rs::hash_cache::HashCache;
 use ipc_server_rs::holders_fetcher::TokenHoldersFetcher;
 // use ipc_server_rs::pump_swap::PumpSwapExecutor;
 use ipc_server_rs::{client::SwapClient, config::SwapConfig};
@@ -50,7 +51,8 @@ async fn extract_spl_token_address(
   text: &str,
   // state: Arc<AppState>,
   executor: Arc<SwapExecutor>,
-  first_conn: bool,
+  // first_conn: bool,
+  hash_cache: Arc<HashCache<Pubkey>>,
 ) -> Option<String> {
   let patterns = [r"[1-9A-HJ-NP-Za-km-z]{43,44}"];
 
@@ -78,7 +80,9 @@ async fn extract_spl_token_address(
       //     )
       //     .await;
       // let first_address = Some(&found_addresses[0].to_string());
-      if first_conn {
+      let address = *found_addresses.first()?;
+
+      if hash_cache.insert(address) {
         let sleep_millis = 0;
         let result = executor
           .execute_round_trip_with_notification(
@@ -99,7 +103,8 @@ async fn handle_client(
   mut socket: tokio::net::UnixStream,
   // state: Arc<AppState>,
   executor: Arc<SwapExecutor>,
-  first_conn: bool,
+  // first_conn: bool,
+  hash_cache: Arc<HashCache<Pubkey>>,
 ) -> Result<(), Box<dyn Error>> {
   let (read_half, mut write_half) = socket.split();
   let mut reader = BufReader::new(read_half);
@@ -124,11 +129,13 @@ async fn handle_client(
           }
         };
 
+        let hash_cache = hash_cache.clone();
         // Extract SPL token address
         let token_address = extract_spl_token_address(
           &request.message,
           executor.clone(),
-          first_conn,
+          // first_conn,
+          hash_cache,
         )
         .await;
         info!("Token address: {:?}", token_address);
@@ -206,6 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
   info!("IPC server listening on {}", socket_path);
 
   let is_first_connection = Arc::new(AtomicBool::new(true));
+  let hash_cache = Arc::new(HashCache::<Pubkey>::new());
   // Accept connections
   loop {
       match listener.accept().await {
@@ -214,14 +222,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
               // let state = state.clone();
               let executor = executor.clone();
+              let hash_cache = hash_cache.clone();
               let is_first_connection = is_first_connection.clone();
 
               tokio::spawn(async move {
                   // let first_conn = is_first_connection.load(Ordering::SeqCst);
-                  let first_conn = is_first_connection.swap(false, Ordering::SeqCst);
+                  // let first_conn = is_first_connection.swap(false, Ordering::SeqCst);
+                  let first_conn = true;
                   info!("First conn: {}", first_conn);
 
-                  if let Err(e) = handle_client(socket, executor, first_conn).await {
+                  if let Err(e) = handle_client(socket, executor, hash_cache).await {
                       error!("Error handling client: {}", e);
                   }
                   // if first_conn {
