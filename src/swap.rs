@@ -183,14 +183,14 @@ impl SwapExecutor {
     debug!("Source ATA: {}", source_ata.to_string());
     // return Err(anyhow!("test"));
 
-    return Ok(SwapResult::new(
-      Signature::new_unique(),
-      *input_mint,
-      *output_mint,
-      pool_id,
-      amount_in,
-      0,
-    ));
+    // return Ok(SwapResult::new(
+    //   Signature::new_unique(),
+    //   input_mint.clone(),
+    //   output_mint.clone(),
+    //   pool_id,
+    //   amount_in,
+    //   0,
+    // ));
 
     match self
       .client
@@ -278,6 +278,7 @@ impl SwapExecutor {
     // self.wait_for_confirmation(&result.signature).await?;
 
     if let Some(notifier) = client.notifier() {
+      debug!("Before format");
       let message = result.format_for_telegram()?;
       notifier.send_message(&message).await?
       // .map_err(|e| warn!("Failed to send Telegram notification: {}", e))
@@ -297,7 +298,7 @@ impl SwapExecutor {
     mint: Pubkey,
     is_input_token: bool,
   ) -> Result<
-    Pubkey,
+    (Pubkey, bool),
     // ClientError
   > {
     let start = Instant::now();
@@ -312,10 +313,11 @@ impl SwapExecutor {
       Ok(_) => {
         let elapsed = start.elapsed();
         info!("ATA already exists, checked in {} ms", elapsed.as_millis());
-        return Ok(ata);
+        return Ok((ata, false));
       }
       Err(_) => {
         info!("Creating new ATA...");
+        return Ok((ata, true));
       }
     }
 
@@ -361,7 +363,7 @@ impl SwapExecutor {
             elapsed.as_millis(),
             sig
           );
-          return Ok(ata);
+          return Ok((ata, false));
         }
         Err(e) => {
           retries -= 1;
@@ -450,9 +452,51 @@ impl SwapExecutor {
       let notify_buy_result =
         SwapExecutor::notify_swap(client, buy.clone()).await?;
 
-      if sleep_millis > 0 {
-        let sleep_after_buy = std::time::Duration::from_millis(sleep_millis); // Average block time
-        std::thread::sleep(sleep_after_buy);
+      // if sleep_millis > 0 {
+      //   let sleep_after_buy = std::time::Duration::from_millis(sleep_millis); // Average block time
+      //   std::thread::sleep(sleep_after_buy);
+      // }
+
+      let config = self.config.read().await;
+      // let mut min_amount_out = 0;
+      // while min_amount_out > ((buy.amount_in as f64 * config.min_profit_percent) as u64) {
+      //   let balance = buy.amount_out;
+      //   min_amount_out = self.get_quote(buy.output_mint, buy.input_mint, balance).await?;
+      // }
+
+      let take_profit_target =
+        (buy.amount_in as f64 * config.min_profit_percent) as u64;
+      let start_time = std::time::Instant::now();
+      let timeout = std::time::Duration::from_millis(sleep_millis);
+      // let slippage_percent = slippage * 100.0;
+      let slippage_percent = 0.0;
+
+      loop {
+        // Check timeout first
+        if start_time.elapsed() > timeout {
+          // Time exceeded
+          info!("Timelimit reached {} ms", sleep_millis);
+          break;
+        }
+
+        // Check take profit
+        // let quote = self
+        //   .get_quote(buy.output_mint, buy.input_mint, buy.amount_out, Some(0.0))
+        //   .await?;
+        // if quote >= take_profit_target {
+        //   // Takelet quote = 0; profit reachelet quote = 0;d
+        //   info!("Take profit reached. Amount in: {}. Amount out: {}", 0, 0);
+        //   break;
+        // }
+        let quote = 0;
+
+        info!(
+          "Current quote ({}% slippage): {}. Time: {} ms",
+          slippage_percent,
+          quote,
+          start_time.elapsed().as_millis()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
 
       // let config = self.config.read().await;
@@ -462,7 +506,6 @@ impl SwapExecutor {
 
       //   let balance_result = self.check_balance(&config.output_mint).await;
       // if let Ok(balance) = balance_result {
-      let balance = buy.amount_out;
 
       // std::mem::swap(&mut self.config.input_mint, &mut self.config.output_mint);
       // {
@@ -474,7 +517,7 @@ impl SwapExecutor {
         .execute_swap(
           Some(&buy.output_mint),
           Some(&buy.input_mint),
-          Some(balance),
+          Some(buy.amount_out),
           Some(buy.pool_id),
           false,
         )
@@ -564,10 +607,17 @@ impl SwapExecutor {
     input_mint: Pubkey,
     output_mint: Pubkey,
     amount_in: u64,
+    slippage: Option<f64>,
   ) -> Result<u64> {
     info!("Getting quote for swap");
 
     let pool_id = self.find_raydium_pool(&input_mint, &output_mint).await?;
+
+    let slippage = if let Some(slip) = slippage {
+      slip
+    } else {
+      self.config.read().await.slippage
+    };
 
     let pool_info = self
       .client
@@ -589,14 +639,10 @@ impl SwapExecutor {
     let compute_result = self
       .client
       .amm_client()
-      .compute_amount_out(
-        &rpc_data,
-        pool,
-        amount_in,
-        self.config.read().await.slippage,
-      )
+      .compute_amount_out(&rpc_data, pool, amount_in, slippage)
       .context("Failed to compute amount out")?;
 
+    debug!("Compute result: {}", compute_result.min_amount_out);
     Ok(compute_result.min_amount_out)
   }
 }

@@ -83,7 +83,7 @@ async fn extract_spl_token_address(
       let address = *found_addresses.first()?;
 
       if hash_cache.insert(address) {
-        let sleep_millis = 0;
+        let sleep_millis = 3500;
         let result = executor
           .execute_round_trip_with_notification(
             None,

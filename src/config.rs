@@ -21,6 +21,7 @@ pub struct SwapConfig {
   pub commitment_config: CommitmentConfig,
   pub min_profit_percent: f64,
   pub stop_loss_percent: f64,
+  pub timelimit_seconds: u64,
 }
 
 impl SwapConfig {
@@ -83,8 +84,19 @@ impl SwapConfig {
       telegram_token: env::var("TG_TOKEN").ok(),
       telegram_chat_id: env::var("TG_CHAT_ID").ok(),
       commitment_config,
-      min_profit_percent: 10.0,
-      stop_loss_percent: 10.0,
+      min_profit_percent: env::var("TAKE_PROFIT")
+        .unwrap_or_else(|_| "1.01".to_string())
+        .parse()
+        .context("Invalid take profit")?,
+      stop_loss_percent: env::var("STOP_LOSS")
+        .unwrap_or_else(|_| "1.01".to_string())
+        .parse()
+        .context("Invalid stop loss")?,
+      timelimit_seconds: env::var("TIMELIMIT_SECONDS")
+        .unwrap_or_else(|_| "13".to_string())
+        .parse()
+        .context("Invalid timelimit")?,
+
     })
   }
 
@@ -109,8 +121,9 @@ impl SwapConfig {
       telegram_token,
       telegram_chat_id,
       commitment_config,
-      min_profit_percent: 10.0,
-      stop_loss_percent: 10.0,
+      min_profit_percent: 1.01,
+      stop_loss_percent: 1.01,
+      timelimit_seconds: 13,
     }
   }
 
