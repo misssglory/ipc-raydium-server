@@ -97,30 +97,39 @@ impl SwapExecutor {
     let config = self.config.read().await;
     // let config = config.clone();
 
-    let input_mint = input_mint.unwrap_or(&config.input_mint);
+    let mut input_mint = input_mint.unwrap_or(&config.input_mint);
     let output_mint = output_mint.unwrap_or(&config.output_mint);
     let amount_in = amount_in.unwrap_or(config.amount_in);
     info!("Input: {} -> Output: {}", input_mint, output_mint);
     info!("Amount in: {}, Slippage: {}%", amount_in, config.slippage * 100.0);
 
-    let is_input_token = false;
+        
+    // Check if both mints are WSOL
+    // let sol_mint = Pubkey::from_str(SOL_MINT)?;
+    // let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?;
+    // if input_mint == &sol_mint && output_mint == &sol_mint {
+    //     warn!("Both input and output mints are WSOL. Changing input mint to USDC.");
+    //     input_mint = &usdc_mint;
+    // }
+
+    // let is_input_token = false;
     let client = self.client.clone();
     // let output_mint = config.output_mint.clone();
-    let ata_task = task::spawn(SwapExecutor::ensure_ata_exists(
-      client.clone(),
-      output_mint.clone(),
-      is_input_token,
-    ));
+    // let ata_task = task::spawn(
+    //   SwapExecutor::ensure_ata_exists(
+    //   client.clone(),
+    //   output_mint.clone(),
+    //   is_input_token,
+    // )
+  // );
+  
+  let destination_ata = get_associated_token_address(&client.keypair().pubkey(), &output_mint);
+    debug!("Find ATA: {}", destination_ata.to_string());
 
     let pool_id = pool_id
       .unwrap_or(self.find_raydium_pool(&input_mint, &output_mint).await?);
 
-    let pool_info = self
-      .client
-      .amm_client()
-      .fetch_pool_by_id(&pool_id)
-      .await
-      .context("Failed to fetch pool by ID")?;
+    debug!("Find pool");
 
     let pool_keys: PoolKeys<AmmPool> = self
       .client
@@ -128,19 +137,28 @@ impl SwapExecutor {
       .fetch_pools_keys_by_id(&pool_id)
       .await
       .context("Failed to fetch pool keys")?;
-
-    let rpc_data = self
-      .client
-      .amm_client()
-      .get_rpc_pool_info(&pool_id)
-      .await
-      .context("Failed to get RPC pool info")?;
-
-    let pool =
-      pool_info.data.first().ok_or_else(|| anyhow!("No pool data found"))?;
+    debug!("Pool keys");
 
     let mut amount_out = 0;
     if config.slippage < 1.0 {
+      let pool_info = self
+        .client
+        .amm_client()
+        .fetch_pool_by_id(&pool_id)
+        .await
+        .context("Failed to fetch pool by ID")?;
+      debug!("Pool info");
+      let pool =
+        pool_info.data.first().ok_or_else(|| anyhow!("No pool data found"))?;
+
+      let rpc_data = self
+        .client
+        .amm_client()
+        .get_rpc_pool_info(&pool_id)
+        .await
+        .context("Failed to get RPC pool info")?;
+      debug!("RPC data");
+
       let compute_result = self
         .client
         .amm_client()
@@ -158,10 +176,15 @@ impl SwapExecutor {
 
     info!("Sending swap transaction...");
 
+    // return Err(anyhow!("test"));
+    let source_ata = get_associated_token_address(&client.keypair().pubkey(), &input_mint);
+    debug!("Source ATA: {}", source_ata.to_string());
+    // return Err(anyhow!("test"));
+
     match self
       .client
       .amm_client()
-      .swap_amm(key, &input_mint, &output_mint, amount_in, amount_out)
+      .swap_amm(key, &input_mint, &output_mint, amount_in, amount_out, source_ata, destination_ata, true)
       .await
     {
       Ok(signature) => {
@@ -222,7 +245,7 @@ impl SwapExecutor {
         Ok(result)
       }
       Err(err) => {
-        // error!("Swap error: {}", err);
+        error!("Swap error: {}", err);
         Err(err)
       }
     }
@@ -247,6 +270,7 @@ impl SwapExecutor {
   }
 
   /// Ensure ATA exists or create it with retry logic
+  
   async fn ensure_ata_exists(
     // &self,
     // config: SwapConfig,

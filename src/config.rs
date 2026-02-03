@@ -51,14 +51,19 @@ impl SwapConfig {
       }
     };
 
-    let amount_in_sol: f64 = env::var("AMOUNT_IN_SOL")
-      .unwrap_or_else(|_| "1.0".to_string()) // Default 1 SOL
-      .parse()
-      .context(
-        "Invalid AMOUNT_IN_SOL value, must be a valid number (e.g., 0.5, 1.23)",
-      )?;
-
-    let amount_in = (amount_in_sol * LAMPORTS_PER_SOL as f64) as u64;
+    let amount_in: u64 = if let Ok(amount_in_str) = env::var("AMOUNT_IN") {
+      amount_in_str.parse().context(
+        "Invalid AMOUNT_IN value, must be a valid integer number of lamports",
+      )?
+    } else {
+      let amount_in_sol: f64 = env::var("AMOUNT_IN_SOL")
+        .unwrap_or_else(|_| "1.0".to_string())
+        .parse()
+        .context(
+            "Invalid AMOUNT_IN_SOL value, must be a valid number (e.g., 0.5, 1.23)",
+        )?;
+      (amount_in_sol * LAMPORTS_PER_SOL as f64) as u64
+    };
 
     Ok(SwapConfig {
       rpc_endpoints,

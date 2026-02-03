@@ -16,27 +16,38 @@ anyhow = "1.0.100"
 chrono = "0.4.43"
 solana-address = "2.0.0"
 solana-sdk = "3.0.0"
-solana-program = { version = "3.0.0"}
+solana-program = { version = "3.0.0" }
 raydium-amm-swap = "0.1.21"
 solana-signature = "3.1.0"
-reqwest = { version = "0.13.1", features = ["json"] }
+reqwest = { version = "0.12.28", features = ["json"] }
 dotenv = "0.15.0"
 solana-client = "3.1.8"
-anchor-spl = "0.32.1"
-spl-associated-token-account = { version = "8.0.0", features = ["no-entrypoint"] }
+# anchor-spl = "0.32.1"
+anchor-spl = "0.31.1"
+spl-associated-token-account = { version = "8.0.0", features = [
+  "no-entrypoint",
+] }
 # solana-compute-budget-instruction = "3.1.8"
 tokio-postgres = "0.7.16"
 # solana-client-helpers = "1.1.0"
 # solana-program-entrypoint = "3.1.1"
 
-spl-token-2022 = { version = "10.0.0", features = ["no-entrypoint"] }  # Added no-entrypoint
+spl-token-2022 = { version = "10.0.0", features = [
+  "no-entrypoint",
+] } # Added no-entrypoint
 solana-account-decoder = "3.1.8"
 base64 = "0.22.1"
+borsh = "1.6.0"
+log = "0.4.29"
+solana-commitment-config = "3.1.0"
+solana-system-interface = "3.0.0"
+solana-pubkey = "2.4.0"
+anchor-lang = "0.32.1"
 
 
 [profile.release]
 opt-level = 3
-lto = true           # Link Time Optimization for smaller/faster binary.
-codegen-units = 1    # Slower compilation, better optimization.
-panic = "abort"      # Reduces binary size (no unwinding).
-strip = "symbols"  
+lto = true        # Link Time Optimization for smaller/faster binary.
+codegen-units = 1 # Slower compilation, better optimization.
+panic = "abort"   # Reduces binary size (no unwinding).
+strip = "symbols"

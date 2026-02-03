@@ -4,6 +4,7 @@ pub mod telegram;
 pub mod types;
 pub mod client;
 pub mod holders_fetcher;
+pub mod amm;
 
 pub use config::*;
 pub use swap::*;
