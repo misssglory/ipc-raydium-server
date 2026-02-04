@@ -72,23 +72,14 @@ async fn extract_spl_token_address(
 
   match found_addresses.len() {
     1 => {
-      // let result = executor
-      //     .execute_swap(
-      //         // state.config.input_mint,
-      //         // found_addresses[0],
-      //         // state.config.amount_in,
-      //     )
-      //     .await;
-      // let first_address = Some(&found_addresses[0].to_string());
       let address = *found_addresses.first()?;
 
       if hash_cache.insert(address) {
-        let sleep_millis = 3500;
         let result = executor
           .execute_round_trip_with_notification(
             None,
             found_addresses.first(),
-            sleep_millis,
+            None,
           )
           .await;
         info!("{:?}", result);
@@ -130,11 +121,9 @@ async fn handle_client(
         };
 
         let hash_cache = hash_cache.clone();
-        // Extract SPL token address
         let token_address = extract_spl_token_address(
           &request.message,
           executor.clone(),
-          // first_conn,
           hash_cache,
         )
         .await;

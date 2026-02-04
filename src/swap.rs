@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use raydium_amm_swap::{
   consts::SOL_MINT,
-  interface::{AmmPool, PoolKeys, PoolType},
+  interface::{AmmPool, ClmmPool, ClmmSinglePoolInfo, PoolKeys, PoolType},
 };
 // use solana_client_helpers::ClientResult;
 use solana_client::{
@@ -29,7 +29,10 @@ use std::{
 use tokio::{sync::RwLock, task, time::sleep};
 use tracing::{debug, error, info, warn};
 
-use crate::{client::SwapClient, config::SwapConfig, types::SwapResult};
+use crate::{
+  amm::client::RpcPoolInfo, client::SwapClient, config::SwapConfig,
+  types::SwapResult,
+};
 use spl_associated_token_account::{
   get_associated_token_address, instruction::create_associated_token_account,
 };
@@ -91,37 +94,30 @@ impl SwapExecutor {
     output_mint: Option<&Pubkey>,
     amount_in: Option<u64>,
     pool_id: Option<Pubkey>,
+    amount_out: u64,
     create_destination_ata: bool,
   ) -> Result<SwapResult> {
     info!("🚀 Starting swap execution");
 
     let config = self.config.read().await;
-    // let config = config.clone();
 
-    let mut input_mint = input_mint.unwrap_or(&config.input_mint);
+    // let mut check_ata_task: Result<(Pubkey, bool)> = Err(anyhow!("Create ATA task"));
+    let mut check_ata_task: Option<task::JoinHandle<Result<(Pubkey, bool)>>> =
+      None;
     let output_mint = output_mint.unwrap_or(&config.output_mint);
+    if create_destination_ata {
+      check_ata_task = Some(task::spawn(SwapExecutor::ensure_ata_exists(
+        self.client.clone(),
+        output_mint.clone(),
+        true,
+      )));
+    }
+    let input_mint = input_mint.unwrap_or(&config.input_mint);
     let amount_in = amount_in.unwrap_or(config.amount_in);
     info!("Input: {} -> Output: {}", input_mint, output_mint);
     info!("Amount in: {}, Slippage: {}%", amount_in, config.slippage * 100.0);
 
-    // Check if both mints are WSOL
-    // let sol_mint = Pubkey::from_str(SOL_MINT)?;
-    // let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")?;
-    // if input_mint == &sol_mint && output_mint == &sol_mint {
-    //     warn!("Both input and output mints are WSOL. Changing input mint to USDC.");
-    //     input_mint = &usdc_mint;
-    // }
-
-    // let is_input_token = false;
     let client = self.client.clone();
-    // let output_mint = config.output_mint.clone();
-    // let ata_task = task::spawn(
-    //   SwapExecutor::ensure_ata_exists(
-    //   client.clone(),
-    //   output_mint.clone(),
-    //   is_input_token,
-    // )
-    // );
 
     let destination_ata =
       get_associated_token_address(&client.keypair().pubkey(), &output_mint);
@@ -140,33 +136,37 @@ impl SwapExecutor {
       .context("Failed to fetch pool keys")?;
     debug!("Pool keys");
 
-    let mut amount_out = 0;
-    if config.slippage < 1.0 {
-      let pool_info = self
-        .client
-        .amm_client()
-        .fetch_pool_by_id(&pool_id)
-        .await
-        .context("Failed to fetch pool by ID")?;
-      debug!("Pool info");
-      let pool =
-        pool_info.data.first().ok_or_else(|| anyhow!("No pool data found"))?;
+    let create_destination_ata = match check_ata_task {
+      None => false,
+      Some(ata_task) => ata_task.await??.1,
+    };
+    // let mut amount_out = 0;
+    // if config.slippage < 1.0 {
+    //   let pool_info = self
+    //     .client
+    //     .amm_client()
+    //     .fetch_pool_by_id(&pool_id)
+    //     .await
+    //     .context("Failed to fetch pool by ID")?;
+    //   debug!("Pool info");
+    //   let pool =
+    //     pool_info.data.first().ok_or_else(|| anyhow!("No pool data found"))?;
 
-      let rpc_data = self
-        .client
-        .amm_client()
-        .get_rpc_pool_info(&pool_id)
-        .await
-        .context("Failed to get RPC pool info")?;
-      debug!("RPC data");
+    //   let rpc_data = self
+    //     .client
+    //     .amm_client()
+    //     .get_rpc_pool_info(&pool_id)
+    //     .await
+    //     .context("Failed to get RPC pool info")?;
+    //   debug!("RPC data");
 
-      let compute_result = self
-        .client
-        .amm_client()
-        .compute_amount_out(&rpc_data, pool, amount_in, config.slippage)
-        .context("Failed to compute amount out")?;
-      amount_out = compute_result.min_amount_out;
-    }
+    //   let compute_result = self
+    //     .client
+    //     .amm_client()
+    //     .compute_amount_out(&rpc_data, pool, amount_in, config.slippage)
+    //     .context("Failed to compute amount out")?;
+    //   amount_out = compute_result.min_amount_out;
+    // }
 
     info!("Swap parameters:");
     info!("  Input amount: {}", amount_in);
@@ -229,6 +229,8 @@ impl SwapExecutor {
           // )
           .await;
 
+        let mut amount_out = amount_out;
+
         match txr {
           Ok(tx) => {
             if let Some(meta) = tx.transaction.meta {
@@ -237,7 +239,7 @@ impl SwapExecutor {
               info!("Post token balances: {:?}", meta.post_token_balances);
               info!("Logs: {:?}", meta.log_messages);
               info!("Instructions: {:?}", meta.inner_instructions);
-              //TODO: Calcualte delta amount
+              //TODO: Calculate delta amount
               if let Some(balance) = SwapExecutor::get_post_token_amount_u64(
                 Arc::new(meta),
                 client.keypair().pubkey().to_string(),
@@ -436,110 +438,87 @@ impl SwapExecutor {
     &self,
     input_mint: Option<&Pubkey>,
     output_mint: Option<&Pubkey>,
-    sleep_millis: u64,
+    sleep_millis: Option<u64>,
   ) -> Result<()> {
-    // let config = self.config.read().await;
-    // let input_mint = input_mint.unwrap_or(&config.input_mint);
-    // let output_mint = output_mint.unwrap_or(&config.output_mint);
-    let buy_result =
-      self.execute_swap(input_mint, output_mint, None, None, true).await;
+    let buy =
+      self.execute_swap(input_mint, output_mint, None, None, 0, true).await?;
 
-    if let Ok(buy) = buy_result {
-      let client = self.client.clone();
-      let buy = Arc::new(buy);
-      // let notify_buy_task =
-      //   task::spawn(SwapExecutor::notify_swap(client, buy.clone()));
-      let notify_buy_result =
-        SwapExecutor::notify_swap(client, buy.clone()).await?;
-
-      // if sleep_millis > 0 {
-      //   let sleep_after_buy = std::time::Duration::from_millis(sleep_millis); // Average block time
-      //   std::thread::sleep(sleep_after_buy);
-      // }
-
-      let config = self.config.read().await;
-      // let mut min_amount_out = 0;
-      // while min_amount_out > ((buy.amount_in as f64 * config.min_profit_percent) as u64) {
-      //   let balance = buy.amount_out;
-      //   min_amount_out = self.get_quote(buy.output_mint, buy.input_mint, balance).await?;
-      // }
-
-      let take_profit_target =
-        (buy.amount_in as f64 * config.min_profit_percent) as u64;
-      let start_time = std::time::Instant::now();
-      let timeout = std::time::Duration::from_millis(sleep_millis);
-      // let slippage_percent = slippage * 100.0;
-      let slippage_percent = 0.0;
-
-      loop {
-        // Check timeout first
-        if start_time.elapsed() > timeout {
-          // Time exceeded
-          info!("Timelimit reached {} ms", sleep_millis);
-          break;
-        }
-
-        // Check take profit
-        // let quote = self
-        //   .get_quote(buy.output_mint, buy.input_mint, buy.amount_out, Some(0.0))
-        //   .await?;
-        // if quote >= take_profit_target {
-        //   // Takelet quote = 0; profit reachelet quote = 0;d
-        //   info!("Take profit reached. Amount in: {}. Amount out: {}", 0, 0);
-        //   break;
-        // }
-        let quote = 0;
-
-        info!(
-          "Current quote ({}% slippage): {}. Time: {} ms",
-          slippage_percent,
-          quote,
-          start_time.elapsed().as_millis()
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-      }
-
-      // let config = self.config.read().await;
-
-      // let balance = 1;
-      // while balance > 0 { }
-
-      //   let balance_result = self.check_balance(&config.output_mint).await;
-      // if let Ok(balance) = balance_result {
-
-      // std::mem::swap(&mut self.config.input_mint, &mut self.config.output_mint);
-      // {
-      //     let mut config = self.config.write().await;
-      //     config.change_direction(balance);
-      // }
-      let buy = buy.clone();
-      let sell_result = self
-        .execute_swap(
-          Some(&buy.output_mint),
-          Some(&buy.input_mint),
-          Some(buy.amount_out),
-          Some(buy.pool_id),
-          false,
-        )
-        .await;
-      // if let Ok(sell) = sell_result {
-      // }
-
-      // notify_buy_task.await;
-      match sell_result {
-        Ok(sell) => {
-          let client = self.client.clone();
-          SwapExecutor::notify_swap(client, Arc::new(sell)).await;
-          return Ok(());
-        }
-        Err(err) => {
-          return Err(anyhow!("Round trip sell error: {}", err));
-        }
-      }
-      // return Err(anyhow!("Round trip sell error"));
+    let buy = Arc::new(buy);
+    if let Err(err) =
+      SwapExecutor::notify_swap(self.client.clone(), buy.clone()).await
+    {
+      error!("Notify swap error: {}", err);
     }
-    return Err(anyhow!("Round trip balance error"));
-    Err(anyhow!("Round trip buy error"))
+
+    let config = self.config.read().await;
+    let sleep_millis = sleep_millis.unwrap_or(config.timelimit_seconds * 1000);
+
+    let take_profit_target =
+      (buy.amount_in as f64 * config.min_profit_percent) as u64;
+    let start_time = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(sleep_millis);
+    let slippage_percent = 0.0;
+
+    let pool_data = self.get_pool(&buy.pool_id).await.ok();
+
+    loop {
+      if start_time.elapsed() > timeout {
+        info!("Timelimit reached {} ms", sleep_millis);
+        break;
+      }
+
+      let mut quote = 0;
+      if let Some(pd) = &pool_data {
+        quote = self.get_quote(buy.amount_in, Some(0.0), pd.clone()).await?;
+      } else {
+        error!("Get quote error");
+      }
+
+      if quote > take_profit_target {
+        info!("Take profit reached");
+        break;
+      }
+
+      info!(
+        "Current quote ({}% slippage): {}. Time: {} ms",
+        slippage_percent,
+        quote,
+        start_time.elapsed().as_millis()
+      );
+      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    let buy = buy.clone();
+    let sell_result = self
+      .execute_swap(
+        Some(&buy.output_mint),
+        Some(&buy.input_mint),
+        Some(buy.amount_out),
+        Some(buy.pool_id),
+        // buy.amount_out,
+        0,
+        false,
+      )
+      .await?;
+
+    // let client = client.clone();
+    if let Err(err) =
+      SwapExecutor::notify_swap(self.client.clone(), Arc::new(sell_result))
+        .await
+    {
+      error!("Notify error: {}", err);
+    }
+    Ok(())
+    // match sell_result {
+    //   Ok(sell) => {
+    //     let client = self.client.clone();
+    //     SwapExecutor::notify_swap(client, Arc::new(sell)).await?;
+    //     return Ok(());
+    //   }
+    //   Err(err) => {
+    //     return Err(anyhow!("Round trip sell error: {}", err));
+    //   }
+    // }
   }
 
   async fn find_raydium_pool(
@@ -601,24 +580,10 @@ impl SwapExecutor {
     Ok(())
   }
 
-  /// Get quote for a swap (without executing)
-  pub async fn get_quote(
+  async fn get_pool(
     &self,
-    input_mint: Pubkey,
-    output_mint: Pubkey,
-    amount_in: u64,
-    slippage: Option<f64>,
-  ) -> Result<u64> {
-    info!("Getting quote for swap");
-
-    let pool_id = self.find_raydium_pool(&input_mint, &output_mint).await?;
-
-    let slippage = if let Some(slip) = slippage {
-      slip
-    } else {
-      self.config.read().await.slippage
-    };
-
+    pool_id: &Pubkey,
+  ) -> Result<Arc<(ClmmSinglePoolInfo, RpcPoolInfo)>> {
     let pool_info = self
       .client
       .amm_client()
@@ -633,13 +598,34 @@ impl SwapExecutor {
       .await
       .context("Failed to get RPC pool info")?;
 
-    let pool =
-      pool_info.data.first().ok_or_else(|| anyhow!("No pool data found"))?;
+    Ok(Arc::new((pool_info, rpc_data)))
+  }
+
+  /// Get quote for a swap (without executing)
+  pub async fn get_quote(
+    &self,
+    amount_in: u64,
+    slippage: Option<f64>,
+    pool_data: Arc<(ClmmSinglePoolInfo, RpcPoolInfo)>,
+  ) -> Result<u64> {
+    info!("Getting quote for swap");
+
+    let slippage = if let Some(slip) = slippage {
+      slip
+    } else {
+      self.config.read().await.slippage
+    };
+
+    let first_pool = if let Some(poopool) = pool_data.0.data.first() {
+      poopool
+    } else {
+      return Err(anyhow!("First pool not found"));
+    };
 
     let compute_result = self
       .client
       .amm_client()
-      .compute_amount_out(&rpc_data, pool, amount_in, slippage)
+      .compute_amount_out(&pool_data.1, first_pool, amount_in, slippage)
       .context("Failed to compute amount out")?;
 
     debug!("Compute result: {}", compute_result.min_amount_out);
