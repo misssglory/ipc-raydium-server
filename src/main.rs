@@ -1,10 +1,14 @@
+use chrono::Local;
 use ipc_server_rs::SwapExecutor;
 use ipc_server_rs::hash_cache::HashCache;
 use ipc_server_rs::holders_fetcher::TokenHoldersFetcher;
+use raydium_amm_swap::consts::SOL_MINT;
 // use ipc_server_rs::pump_swap::PumpSwapExecutor;
 use ipc_server_rs::{client::SwapClient, config::SwapConfig};
 use serde::{Deserialize, Serialize};
 use solana_program::pubkey::Pubkey;
+use std::cmp::Ordering::{Equal, Greater, Less};
+use std::env;
 use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
@@ -13,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{debug, error, info};
+use tracing_subscriber::{Layer, Registry, fmt, prelude::*};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IpcRequest {
@@ -75,15 +80,30 @@ async fn extract_spl_token_address(
       let address = *found_addresses.first()?;
 
       if hash_cache.insert(address) {
-        let result = executor
-          .execute_round_trip_with_notification(
-            None,
-            found_addresses.first(),
-            500,
-          )
-          .await;
-        // let result = executor.quote_loop(None, None, None, None, None).await;
-        info!("{:?}", result);
+        for i in 0..2 {
+          // let result = executor
+          //   .execute_round_trip_with_notification(
+          //     None,
+          //     found_addresses.first(),
+          //     500,
+          //   )
+          //   .await;
+          // let mut config = executor.config_mut().await;
+          // config.min_profit_percent = 1.0 + (config.min_profit_percent - 1.0) * 2.0;
+          let result = executor
+            .quote_loop(
+              None,
+              Some(&Pubkey::from_str(SOL_MINT).unwrap()),
+              Some(&address),
+              None,
+              None,
+              None,
+              1500,
+              Less,
+            )
+            .await;
+          info!("{:?}", result);
+        }
       }
       Some(found_addresses[0].to_string())
     }
@@ -155,12 +175,33 @@ struct AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
   let mut config = SwapConfig::from_env()?;
-  tracing_subscriber::fmt()
+
+  let binary_name = env::current_exe()
+    .ok()
+    .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+    .unwrap_or_else(|| "app".to_string());
+
+  let start_time = Local::now().format("%y%m%d_%H-%M-%S");
+  let file_name = format!("{}_{}.log", binary_name, start_time);
+
+  let file_appender = tracing_appender::rolling::never("logs", &file_name);
+  let (non_blocking_file, _guard) =
+    tracing_appender::non_blocking(file_appender);
+
+  let stdout_layer = fmt::Layer::default()
     .with_target(false)
-    // .with_timer(tracing_subscriber::fmt::time::uptime())
-    .with_level(false)
-    .with_max_level(config.log_level)
-    .init();
+    .with_level(true)
+    .with_writer(std::io::stdout)
+    .with_filter(config.log_level);
+
+  let file_layer = fmt::Layer::default()
+    .with_target(false)
+    .with_level(true)
+    .with_ansi(false) // Recommended for file logs to avoid raw escape codes
+    .with_writer(non_blocking_file)
+    .with_filter(config.log_level);
+
+  Registry::default().with(stdout_layer).with(file_layer).init();
 
   debug!("Amount in: {}", config.amount_in);
 

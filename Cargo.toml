@@ -11,7 +11,7 @@ spl-token = { version = "9.0.0", features = ["no-entrypoint"] }
 regex = "1.12.2"
 hex = "0.4.3"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.22"
+tracing-subscriber = { version = "0.3.22", features = ["registry", "std", "fmt", "env-filter"] }
 anyhow = "1.0.100"
 chrono = "0.4.43"
 solana-address = "2.0.0"
@@ -43,6 +43,8 @@ solana-commitment-config = "3.1.0"
 solana-system-interface = "3.0.0"
 solana-pubkey = "2.4.0"
 anchor-lang = "0.32.1"
+compare = "0.1.0"
+tracing-appender = "0.2.4"
 
 
 [profile.release]

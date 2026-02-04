@@ -7,6 +7,7 @@ use solana_program::pubkey::Pubkey;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use std::sync::Arc;
 use std::{env, str::FromStr};
+use tracing_subscriber::filter::LevelFilter;
 
 #[derive(Debug, Clone)]
 pub struct SwapConfig {
@@ -22,7 +23,7 @@ pub struct SwapConfig {
   pub min_profit_percent: f64,
   pub stop_loss_percent: f64,
   pub timelimit_seconds: u64,
-  pub log_level: tracing::Level,
+  pub log_level: LevelFilter,
 }
 
 impl SwapConfig {
@@ -56,10 +57,10 @@ impl SwapConfig {
     let log_level = match env::var("LOG_LEVEL")
       .unwrap_or_else(|_| "info".to_string())
       .as_str() {
-      "warn" => tracing::Level::WARN,
-      "info" => tracing::Level::INFO,
-      "debug" => tracing::Level::DEBUG,
-      _ => tracing::Level::INFO,
+      "warn" => LevelFilter::WARN,
+      "info" => LevelFilter::INFO,
+      "debug" => LevelFilter::DEBUG,
+      _ => LevelFilter::INFO,
     };
 
     let amount_in: u64 = if let Ok(amount_in_str) = env::var("AMOUNT_IN") {
@@ -134,7 +135,7 @@ impl SwapConfig {
       min_profit_percent: 1.01,
       stop_loss_percent: 1.01,
       timelimit_seconds: 13,
-      log_level: tracing::Level::INFO,
+      log_level: LevelFilter::INFO,
     }
   }
 

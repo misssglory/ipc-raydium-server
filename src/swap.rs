@@ -19,7 +19,11 @@ use solana_sdk::{
 };
 use solana_signature::Signature;
 use std::{
-  collections::HashMap, str::FromStr, sync::Arc, time::{Duration, Instant}
+  cmp::Ordering,
+  collections::HashMap,
+  str::FromStr,
+  sync::Arc,
+  time::{Duration, Instant},
 };
 use tokio::{sync::RwLock, task, time::sleep};
 use tracing::{debug, error, info, warn};
@@ -32,6 +36,11 @@ use spl_associated_token_account::{
   get_associated_token_address, instruction::create_associated_token_account,
 };
 use spl_token::{ID as TOKEN_PROGRAM_ID, instruction::initialize_account};
+
+use compare::{Compare, natural};
+
+use std::cmp::Ordering::{Equal, Greater, Less};
+
 /// Swap executor that can be reused with different mints
 #[derive(Clone)]
 pub struct SwapExecutor {
@@ -52,6 +61,12 @@ impl SwapExecutor {
     config: Arc<RwLock<SwapConfig>>,
   ) -> Self {
     SwapExecutor { client, config }
+  }
+
+  pub async fn config_mut(
+    &self,
+  ) -> tokio::sync::RwLockWriteGuard<SwapConfig> {
+    self.config.write().await
   }
 
   pub fn get_post_token_amount_u64(
@@ -128,14 +143,18 @@ impl SwapExecutor {
 
     // Get pre balances
     let pre_balances = match &meta.pre_token_balances {
-      OptionSerializer::Some(balances) => SwapExecutor::balances_to_hashmap(balances, owner),
+      OptionSerializer::Some(balances) => {
+        SwapExecutor::balances_to_hashmap(balances, owner)
+      }
       OptionSerializer::None => HashMap::new(),
       OptionSerializer::Skip => HashMap::new(),
     };
 
     // Get post balances
     let post_balances = match &meta.post_token_balances {
-      OptionSerializer::Some(balances) => SwapExecutor::balances_to_hashmap(balances, owner),
+      OptionSerializer::Some(balances) => {
+        SwapExecutor::balances_to_hashmap(balances, owner)
+      }
       OptionSerializer::None => HashMap::new(),
       OptionSerializer::Skip => HashMap::new(),
     };
@@ -308,11 +327,11 @@ impl SwapExecutor {
         match txr {
           Ok(tx) => {
             if let Some(meta) = tx.transaction.meta {
-              info!("Transaction meta:");
-              info!("Pre token balances: {:?}", meta.pre_token_balances);
-              info!("Post token balances: {:?}", meta.post_token_balances);
-              info!("Logs: {:?}", meta.log_messages);
-              info!("Instructions: {:?}", meta.inner_instructions);
+              debug!("Transaction meta:");
+              debug!("Pre token balances: {:?}", meta.pre_token_balances);
+              debug!("Post token balances: {:?}", meta.post_token_balances);
+              debug!("Logs: {:?}", meta.log_messages);
+              debug!("Instructions: {:?}", meta.inner_instructions);
               let meta_ref = Arc::new(meta);
               let owner = client.keypair().pubkey().to_string();
               // let pre_balance = SwapExecutor::get_pre_token_amount_u64(
@@ -326,13 +345,21 @@ impl SwapExecutor {
               //   output_mint_str,
               // )?;
               // amount_out = post_balance - pre_balance;
-              let balance_deltas = SwapExecutor::get_token_balance_deltas(meta_ref.clone(), &owner);
-              amount_out = std::cmp::max(*balance_deltas.get(&output_mint.to_string()).unwrap_or(&0), 0) as u64;
-              amount_in = std::cmp::max(-*balance_deltas.get(&input_mint.to_string()).unwrap_or(&0), 0) as u64;
+              let balance_deltas = SwapExecutor::get_token_balance_deltas(
+                meta_ref.clone(),
+                &owner,
+              );
+              amount_out = std::cmp::max(
+                *balance_deltas.get(&output_mint.to_string()).unwrap_or(&0),
+                0,
+              ) as u64;
+              amount_in = std::cmp::max(
+                -*balance_deltas.get(&input_mint.to_string()).unwrap_or(&0),
+                0,
+              ) as u64;
               info!(
                 "Amount out for round trip: {}. Amount in: {}",
-                amount_out,
-                amount_in
+                amount_out, amount_in
               );
             }
           }
@@ -533,11 +560,10 @@ impl SwapExecutor {
 
     let config = self.config.read().await;
 
-    let target_quote =
-      (buy.amount_out as f64 / config.min_profit_percent) as u64;
-
     std::thread::sleep(Duration::from_millis(sleep_millis));
 
+    let target_quote =
+      (buy.amount_out as f64 / config.min_profit_percent) as u64;
     //TODO: Nofity result slippage
     let quote = self
       .quote_loop(
@@ -548,6 +574,7 @@ impl SwapExecutor {
         None,
         Some(target_quote),
         1500,
+        Less,
       )
       .await;
 
@@ -565,12 +592,29 @@ impl SwapExecutor {
       .await?;
 
     // let client = client.clone();
+    let sell = Arc::new(sell_result);
     if let Err(err) =
-      SwapExecutor::notify_swap(self.client.clone(), Arc::new(sell_result))
+      SwapExecutor::notify_swap(self.client.clone(), sell.clone())
         .await
     {
       error!("Notify error: {}", err);
     }
+
+    let target_quote = (buy.amount_out as f64) as u64;
+    //TODO: Nofity result slippage
+    let quote = self
+      .quote_loop(
+        Some(buy.pool_id),
+        None,
+        None,
+        Some(sell.amount_in),
+        None,
+        Some(target_quote),
+        1500,
+        Greater,
+      )
+      .await;
+
     Ok(())
     // match sell_result {
     //   Ok(sell) => {
@@ -652,6 +696,7 @@ impl SwapExecutor {
     timelimit_millis: Option<u64>,
     target_quote: Option<u64>,
     poll_period_millis: u64,
+    cmp_order: Ordering,
   ) -> Result<u64> {
     let mut quote = 0;
     let config = self.config.read().await;
@@ -676,6 +721,7 @@ impl SwapExecutor {
       .fetch_pool_by_id(&pool_id)
       .await
       .context("Failed to fetch pool by ID")?;
+    let cmp = natural();
     loop {
       let step_time = Instant::now();
       quote =
@@ -691,14 +737,16 @@ impl SwapExecutor {
         break;
       }
 
+
       if let Some(tq) = target_quote {
         info!(
-          "Quote {} Target: {} Diff: {}",
+          "Quote {} Target: {} Diff: {} elapsed: {} ms",
           quote,
           tq,
-          (quote as f64 / tq as f64 - 1.0)
+          (quote as f64 / tq as f64 - 1.0),
+          start_time.elapsed().as_millis()
         );
-        if quote < tq {
+        if cmp.compare(&quote, &tq) == cmp_order {
           info!("Target quote reached!");
           break;
         }
