@@ -19,12 +19,7 @@ use solana_sdk::{
 };
 use solana_signature::Signature;
 use std::{
-  str::FromStr,
-  sync::{
-    Arc,
-    //  RwLock
-  },
-  time::{Duration, Instant},
+  collections::HashMap, str::FromStr, sync::Arc, time::{Duration, Instant}
 };
 use tokio::{sync::RwLock, task, time::sleep};
 use tracing::{debug, error, info, warn};
@@ -63,7 +58,7 @@ impl SwapExecutor {
     meta: Arc<UiTransactionStatusMeta>,
     owner_address: String,
     mint_address: String,
-  ) -> Option<u64> {
+  ) -> Result<u64> {
     if let OptionSerializer::Some(post_balances) = &meta.post_token_balances {
       return SwapExecutor::get_token_amount_u64(
         post_balances,
@@ -71,21 +66,99 @@ impl SwapExecutor {
         mint_address,
       );
     }
-    None
+    Err(anyhow!("Post balance error"))
+  }
+
+  pub fn get_pre_token_amount_u64(
+    meta: Arc<UiTransactionStatusMeta>,
+    owner_address: String,
+    mint_address: String,
+  ) -> Result<u64> {
+    if let OptionSerializer::Some(post_balances) = &meta.pre_token_balances {
+      return SwapExecutor::get_token_amount_u64(
+        post_balances,
+        owner_address,
+        mint_address,
+      );
+    }
+    Err(anyhow!("Pre balance error"))
   }
 
   pub fn get_token_amount_u64(
     balances: &Vec<UiTransactionTokenBalance>,
     owner_address: String,
     mint_address: String,
-  ) -> Option<u64> {
+  ) -> Result<u64> {
     let balance_entry = balances.iter().find(|b| {
       if let OptionSerializer::Some(o) = &b.owner {
         return *o == owner_address && b.mint == mint_address;
       }
       false
-    })?;
-    balance_entry.ui_token_amount.amount.parse::<u64>().ok()
+    });
+    match balance_entry {
+      Some(balance) => Ok(balance.ui_token_amount.amount.parse::<u64>()?),
+      None => Err(anyhow!("Balance not found")),
+    }
+  }
+
+  // Helper function to convert a balance vec to HashMap for easier lookup
+  fn balances_to_hashmap(
+    balances: &Vec<UiTransactionTokenBalance>,
+    owner: &String,
+  ) -> HashMap<String, u64> {
+    let mut map = HashMap::new();
+
+    for balance in balances {
+      if let OptionSerializer::Some(balance_owner) = &balance.owner {
+        if balance_owner == owner {
+          if let Ok(amount) = balance.ui_token_amount.amount.parse::<u64>() {
+            map.insert(balance.mint.clone(), amount);
+          }
+        }
+      }
+    }
+    map
+  }
+
+  pub fn get_token_balance_deltas(
+    meta: Arc<UiTransactionStatusMeta>,
+    owner: &String,
+  ) -> HashMap<String, i64> {
+    let mut deltas = HashMap::new();
+
+    // Get pre balances
+    let pre_balances = match &meta.pre_token_balances {
+      OptionSerializer::Some(balances) => SwapExecutor::balances_to_hashmap(balances, owner),
+      OptionSerializer::None => HashMap::new(),
+      OptionSerializer::Skip => HashMap::new(),
+    };
+
+    // Get post balances
+    let post_balances = match &meta.post_token_balances {
+      OptionSerializer::Some(balances) => SwapExecutor::balances_to_hashmap(balances, owner),
+      OptionSerializer::None => HashMap::new(),
+      OptionSerializer::Skip => HashMap::new(),
+    };
+
+    // Collect all unique mints from both pre and post balances
+    let all_mints: std::collections::HashSet<_> =
+      pre_balances.keys().chain(post_balances.keys()).collect();
+
+    // Calculate deltas for each mint
+    for mint in all_mints {
+      let pre_amount = pre_balances.get(mint).copied().unwrap_or(0);
+      let post_amount = post_balances.get(mint).copied().unwrap_or(0);
+
+      // Calculate delta (post - pre) as i64 to handle negative values
+      let delta = post_amount as i64 - pre_amount as i64;
+
+      // Only include non-zero deltas if you want (optional)
+      if delta != 0 {
+        deltas.insert(mint.clone(), delta);
+      }
+    }
+
+    deltas
   }
 
   pub async fn execute_swap(
@@ -230,6 +303,7 @@ impl SwapExecutor {
           .await;
 
         let mut amount_out = amount_out;
+        let mut amount_in = amount_in;
 
         match txr {
           Ok(tx) => {
@@ -239,15 +313,27 @@ impl SwapExecutor {
               info!("Post token balances: {:?}", meta.post_token_balances);
               info!("Logs: {:?}", meta.log_messages);
               info!("Instructions: {:?}", meta.inner_instructions);
-              //TODO: Calculate delta amount
-              if let Some(balance) = SwapExecutor::get_post_token_amount_u64(
-                Arc::new(meta),
-                client.keypair().pubkey().to_string(),
-                output_mint.to_string(),
-              ) {
-                amount_out = balance;
-              }
-              info!("Amount out for round trip: {}", amount_out);
+              let meta_ref = Arc::new(meta);
+              let owner = client.keypair().pubkey().to_string();
+              // let pre_balance = SwapExecutor::get_pre_token_amount_u64(
+              //   meta_ref.clone(),
+              //   owner.clone(),
+              //   output_mint_str.clone(),
+              // )?;
+              // let post_balance = SwapExecutor::get_post_token_amount_u64(
+              //   meta_ref.clone(),
+              //   owner,
+              //   output_mint_str,
+              // )?;
+              // amount_out = post_balance - pre_balance;
+              let balance_deltas = SwapExecutor::get_token_balance_deltas(meta_ref.clone(), &owner);
+              amount_out = std::cmp::max(*balance_deltas.get(&output_mint.to_string()).unwrap_or(&0), 0) as u64;
+              amount_in = std::cmp::max(-*balance_deltas.get(&input_mint.to_string()).unwrap_or(&0), 0) as u64;
+              info!(
+                "Amount out for round trip: {}. Amount in: {}",
+                amount_out,
+                amount_in
+              );
             }
           }
           Err(err) => {
@@ -277,16 +363,11 @@ impl SwapExecutor {
     client: Arc<SwapClient>,
     result: Arc<SwapResult>,
   ) -> Result<()> {
-    // self.wait_for_confirmation(&result.signature).await?;
-
     if let Some(notifier) = client.notifier() {
       debug!("Before format");
       let message = result.format_for_telegram()?;
       notifier.send_message(&message).await?
-      // .map_err(|e| warn!("Failed to send Telegram notification: {}", e))
-      // .ok();
     }
-
     Ok(())
   }
 
@@ -438,7 +519,7 @@ impl SwapExecutor {
     &self,
     input_mint: Option<&Pubkey>,
     output_mint: Option<&Pubkey>,
-    sleep_millis: Option<u64>,
+    sleep_millis: u64,
   ) -> Result<()> {
     let buy =
       self.execute_swap(input_mint, output_mint, None, None, 0, true).await?;
@@ -451,42 +532,24 @@ impl SwapExecutor {
     }
 
     let config = self.config.read().await;
-    let sleep_millis = sleep_millis.unwrap_or(config.timelimit_seconds * 1000);
 
-    let take_profit_target =
-      (buy.amount_in as f64 * config.min_profit_percent) as u64;
-    let start_time = std::time::Instant::now();
-    let timeout = std::time::Duration::from_millis(sleep_millis);
-    let slippage_percent = 0.0;
+    let target_quote =
+      (buy.amount_out as f64 / config.min_profit_percent) as u64;
 
-    let pool_data = self.get_pool(&buy.pool_id).await.ok();
+    std::thread::sleep(Duration::from_millis(sleep_millis));
 
-    loop {
-      if start_time.elapsed() > timeout {
-        info!("Timelimit reached {} ms", sleep_millis);
-        break;
-      }
-
-      let mut quote = 0;
-      if let Some(pd) = &pool_data {
-        quote = self.get_quote(buy.amount_in, Some(0.0), pd.clone()).await?;
-      } else {
-        error!("Get quote error");
-      }
-
-      if quote > take_profit_target {
-        info!("Take profit reached");
-        break;
-      }
-
-      info!(
-        "Current quote ({}% slippage): {}. Time: {} ms",
-        slippage_percent,
-        quote,
-        start_time.elapsed().as_millis()
-      );
-      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
+    //TODO: Nofity result slippage
+    let quote = self
+      .quote_loop(
+        Some(buy.pool_id),
+        None,
+        None,
+        Some(buy.amount_in),
+        None,
+        Some(target_quote),
+        1500,
+      )
+      .await;
 
     let buy = buy.clone();
     let sell_result = self
@@ -580,25 +643,73 @@ impl SwapExecutor {
     Ok(())
   }
 
-  async fn get_pool(
+  pub async fn quote_loop(
     &self,
-    pool_id: &Pubkey,
-  ) -> Result<Arc<(ClmmSinglePoolInfo, RpcPoolInfo)>> {
+    pool_id: Option<Pubkey>,
+    input_mint: Option<&Pubkey>,
+    output_mint: Option<&Pubkey>,
+    amount_in: Option<u64>,
+    timelimit_millis: Option<u64>,
+    target_quote: Option<u64>,
+    poll_period_millis: u64,
+  ) -> Result<u64> {
+    let mut quote = 0;
+    let config = self.config.read().await;
+    let amount_in = amount_in.unwrap_or(config.amount_in);
+    let timelimit_millis =
+      timelimit_millis.unwrap_or(config.timelimit_seconds * 1000) as u128;
+
+    let pool_id = match pool_id {
+      Some(p_id) => p_id,
+      None => {
+        let input_mint = input_mint.unwrap_or(&config.input_mint);
+        let output_mint = output_mint.unwrap_or(&config.output_mint);
+        let pid = self.find_raydium_pool(input_mint, output_mint).await?;
+        pid
+      }
+    };
+    let start_time = Instant::now();
+    // let timelimit = std::time::Duration::from_millis(timelimit_millis);
     let pool_info = self
       .client
       .amm_client()
       .fetch_pool_by_id(&pool_id)
       .await
       .context("Failed to fetch pool by ID")?;
+    loop {
+      let step_time = Instant::now();
+      quote =
+        self.get_quote(amount_in, Some(0.0), &pool_info, &pool_id).await?;
 
-    let rpc_data = self
-      .client
-      .amm_client()
-      .get_rpc_pool_info(&pool_id)
-      .await
-      .context("Failed to get RPC pool info")?;
+      if start_time.elapsed().as_millis() > timelimit_millis {
+        info!("Timelimit {} ms reached! Quote: {}", timelimit_millis, quote);
+        if let Some(tq) = target_quote {
+          info!("Target: {} Diff: {}", tq, (quote as f64 / tq as f64 - 1.0));
+        } else {
+          info!("No target quote was provided");
+        }
+        break;
+      }
 
-    Ok(Arc::new((pool_info, rpc_data)))
+      if let Some(tq) = target_quote {
+        info!(
+          "Quote {} Target: {} Diff: {}",
+          quote,
+          tq,
+          (quote as f64 / tq as f64 - 1.0)
+        );
+        if quote < tq {
+          info!("Target quote reached!");
+          break;
+        }
+      }
+
+      let elapsed_millis = step_time.elapsed().as_millis() as u64;
+      std::thread::sleep(Duration::from_millis(
+        std::cmp::max(poll_period_millis, elapsed_millis) - elapsed_millis,
+      ));
+    }
+    Ok(quote)
   }
 
   /// Get quote for a swap (without executing)
@@ -606,7 +717,9 @@ impl SwapExecutor {
     &self,
     amount_in: u64,
     slippage: Option<f64>,
-    pool_data: Arc<(ClmmSinglePoolInfo, RpcPoolInfo)>,
+    pool_info: &ClmmSinglePoolInfo,
+    // pool_id: Option<&Pubkey>,
+    pool_id: &Pubkey,
   ) -> Result<u64> {
     info!("Getting quote for swap");
 
@@ -616,19 +729,37 @@ impl SwapExecutor {
       self.config.read().await.slippage
     };
 
-    let first_pool = if let Some(poopool) = pool_data.0.data.first() {
+    //TODO: iterate over all pools
+    let first_pool = if let Some(poopool) = pool_info.data.first() {
       poopool
     } else {
       return Err(anyhow!("First pool not found"));
     };
+    // let pool_id = pool_id.unwrap_or(&Pubkey::from_str(&first_pool.id)?);
+    let rpc_data = self
+      .client
+      .amm_client()
+      .get_rpc_pool_info(&pool_id)
+      .await
+      .context("Failed to get RPC pool info")?;
 
     let compute_result = self
       .client
       .amm_client()
-      .compute_amount_out(&pool_data.1, first_pool, amount_in, slippage)
+      .compute_amount_out(&rpc_data, first_pool, amount_in, slippage)
       .context("Failed to compute amount out")?;
 
-    debug!("Compute result: {}", compute_result.min_amount_out);
+    debug!("{}", compute_result);
     Ok(compute_result.min_amount_out)
+
+    // let compute_result = self
+    //   .client
+    //   .amm_client()
+    //   .compute_amount_in(&pool_data.1, first_pool, amount_in / 1000, slippage)
+    //   .context("Failed to compute amount out")?;
+
+    // debug!("{}", compute_result);
+
+    // Ok(compute_result.max_amount_in)
   }
 }

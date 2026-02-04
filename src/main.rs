@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IpcRequest {
@@ -79,9 +79,10 @@ async fn extract_spl_token_address(
           .execute_round_trip_with_notification(
             None,
             found_addresses.first(),
-            None,
+            500,
           )
           .await;
+        // let result = executor.quote_loop(None, None, None, None, None).await;
         info!("{:?}", result);
       }
       Some(found_addresses[0].to_string())
@@ -161,6 +162,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .with_max_level(config.log_level)
     .init();
 
+  debug!("Amount in: {}", config.amount_in);
+
   let socket_path = "/tmp/spl_token_ipc.sock";
 
   // Remove socket file if it exists
@@ -172,7 +175,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
   let client = SwapClient::new(&config).await?;
 
   // let mut fetcher =
-    // TokenHoldersFetcher::new(&config.rpc_endpoints[0].clone()).await?;
+  // TokenHoldersFetcher::new(&config.rpc_endpoints[0].clone()).await?;
   let executor = Arc::new(SwapExecutor::new(client, config));
 
   // let state = Arc::new(AppState {
@@ -194,7 +197,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
   //     )
   //     .await?;
 
-
   // fetcher.fetch_holders("8aZEym6Uv5vuy2LQ9BYNSiSiiKS3JKJEhbiUgpQppump").await?;
   // Ok(())
 
@@ -205,34 +207,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
   let hash_cache = Arc::new(HashCache::<Pubkey>::new());
   // Accept connections
   loop {
-      match listener.accept().await {
-          Ok((socket, _addr)) => {
-              info!("New client connected");
+    match listener.accept().await {
+      Ok((socket, _addr)) => {
+        info!("New client connected");
 
-              // let state = state.clone();
-              let executor = executor.clone();
-              let hash_cache = hash_cache.clone();
-              let is_first_connection = is_first_connection.clone();
+        // let state = state.clone();
+        let executor = executor.clone();
+        let hash_cache = hash_cache.clone();
+        let is_first_connection = is_first_connection.clone();
 
-              tokio::spawn(async move {
-                  // let first_conn = is_first_connection.load(Ordering::SeqCst);
-                  // let first_conn = is_first_connection.swap(false, Ordering::SeqCst);
-                  let first_conn = true;
-                  info!("First conn: {}", first_conn);
+        tokio::spawn(async move {
+          // let first_conn = is_first_connection.load(Ordering::SeqCst);
+          // let first_conn = is_first_connection.swap(false, Ordering::SeqCst);
+          let first_conn = true;
+          info!("First conn: {}", first_conn);
 
-                  if let Err(e) = handle_client(socket, executor, hash_cache).await {
-                      error!("Error handling client: {}", e);
-                  }
-                  // if first_conn {
-                  //     is_first_connection.store(false, Ordering::SeqCst);
-                  // }
-              });
+          if let Err(e) = handle_client(socket, executor, hash_cache).await {
+            error!("Error handling client: {}", e);
           }
-          Err(e) => {
-              error!("Error accepting connection: {}", e);
-              break;
-          }
+          // if first_conn {
+          //     is_first_connection.store(false, Ordering::SeqCst);
+          // }
+        });
       }
+      Err(e) => {
+        error!("Error accepting connection: {}", e);
+        break;
+      }
+    }
   }
 
   Ok(())
