@@ -428,7 +428,8 @@ impl SwapExecutor {
 
     // let target_quote =
     // (buy.amount_out as f64 / config.min_profit_percent) as u64;
-    let (mut quote_params, pool_info) = self.get_quote_params(&buy).await?;
+    let (mut quote_params, pool_info) =
+      self.get_quote_params(&buy, true).await?;
 
     //TODO: Nofity result slippage
     let quote = self
@@ -447,9 +448,6 @@ impl SwapExecutor {
       )
       .await;
 
-    quote_params.cmp_order =
-      if quote_params.cmp_order == Less { Greater } else { Less };
-
     let buy = buy.clone();
     let sell_result = self
       .execute_swap(
@@ -463,6 +461,16 @@ impl SwapExecutor {
       )
       .await?;
 
+    // let (quote_params.cmp_order, quote_params.target_quote) =
+    //   if quote_params.cmp_order == Less { Greater } else { Less };
+    if quote_params.cmp_order == Less {
+      quote_params.cmp_order = Greater;
+      quote_params.target_quote = Some(0);
+    } else {
+      quote_params.cmp_order = Less;
+      quote_params.target_quote = Some(0);
+    }
+
     // let client = client.clone();
     let sell = Arc::new(sell_result);
     if let Err(err) =
@@ -471,7 +479,10 @@ impl SwapExecutor {
       error!("Notify error: {}", err);
     }
 
-    let target_quote = (buy.amount_out as f64) as u64;
+    std::thread::sleep(Duration::from_millis(sleep_millis));
+
+    let (quote_params, pool_info) = self.get_quote_params(&sell, true).await?;
+    // let target_quote = (buy.amount_out as f64) as u64;
     //TODO: Nofity result slippage
     let quote = self
       .quote_loop(
@@ -557,6 +568,7 @@ impl SwapExecutor {
   pub async fn get_quote_params(
     &self,
     swap_result: &SwapResult,
+    target_higher: bool,
     // ) -> Result<(u64, Ordering)> {
   ) -> Result<(QuoteParams, ClmmSinglePoolInfo)> {
     let pool_info = self
@@ -574,31 +586,45 @@ impl SwapExecutor {
     if mint_a_address == swap_result.input_mint.to_string() {
       debug!("Mint A IS input mint");
       // return Ok((swap_result.amount_in, Less));
-      let target_quote = Some(
-        (swap_result.amount_out as f64
-          / self.config.read().await.min_profit_percent) as u64,
-      );
+      let target_quote = if target_higher {
+        Some(
+          (swap_result.amount_out as f64
+            / self.config.read().await.min_profit_percent) as u64,
+        )
+      } else {
+        Some(
+          (swap_result.amount_out as f64
+            * self.config.read().await.min_profit_percent) as u64,
+        )
+      };
       return Ok((
-        QuoteParams {
-          amount_in: swap_result.amount_in,
-          cmp_order: Less,
+        QuoteParams::new(
+          swap_result.amount_in,
+          if target_higher { Less } else { Greater },
           target_quote,
-        },
+        ),
         pool_info,
       ));
     } else {
       debug!("Mint A is NOT input mint");
-      let target_quote = Some(
-        (swap_result.amount_in as f64
-          * self.config.read().await.min_profit_percent) as u64,
-      );
+      let target_quote = if target_higher {
+        Some(
+          (swap_result.amount_in as f64
+            * self.config.read().await.min_profit_percent) as u64,
+        )
+      } else {
+        Some(
+          (swap_result.amount_in as f64
+            / self.config.read().await.min_profit_percent) as u64,
+        )
+      };
       // return Ok((swap_result.amount_out, Greater));
       return Ok((
-        QuoteParams {
-          amount_in: swap_result.amount_out,
-          cmp_order: Greater,
+        QuoteParams::new(
+          swap_result.amount_out,
+          if target_higher { Greater } else { Less },
           target_quote,
-        },
+        ),
         pool_info,
       ));
     };

@@ -2,6 +2,7 @@ use anyhow::Result;
 use raydium_amm_swap::interface::{ClmmPool, ClmmSinglePoolInfo};
 use solana_sdk::pubkey::Pubkey;
 use solana_signature::Signature;
+use tracing::debug;
 
 #[derive(Debug)]
 pub enum FormatError {
@@ -75,6 +76,19 @@ impl SwapResult {
     }
   }
 
+  // pub fn flipped(
+  //   &self
+  // ) {
+  //   //TODO: Fix links
+  //   let result = self.clone();
+  //   let tmp = result.amount_in;
+  //   result.amount_in = result.amount_out;
+  //   result.amount_out = result.amount_in;
+  //   let tmp = result.input_mint;
+  //   result.input_mint = result.output_mint;
+  //   result.
+  // }
+
   // pub fn format_for_telegram(
   //     &self,
   //     // user_wallet: Option<&str>
@@ -111,8 +125,9 @@ impl SwapResult {
   // }
   pub fn format_for_telegram(
     &self,
-  ) -> Result<String, 
-//   Box<dyn std::error::Error>
+  ) -> Result<
+    String,
+    //   Box<dyn std::error::Error>
   > {
     // Convert all to strings first to catch any potential panics
     let signature = self.signature.to_string();
@@ -130,9 +145,9 @@ impl SwapResult {
 
     // }
     let timestamp_str = if let Ok(ts_str) = timestamp_result {
-        ts_str
+      ts_str
     } else {
-        "Time format error".to_string()
+      "Time format error".to_string()
     };
 
     let raydium_url = format!(
@@ -186,10 +201,88 @@ impl SwapParams {
   }
 }
 
-#[derive(Debug,)]
+#[derive(Debug)]
 pub struct QuoteParams {
   pub amount_in: u64,
   pub cmp_order: std::cmp::Ordering,
   pub target_quote: Option<u64>,
   // pub pool_info: &ClmmSinglePoolInfo,
 }
+
+impl QuoteParams {
+  pub fn new(
+    amount_in: u64,
+    cmp_order: std::cmp::Ordering,
+    target_quote: Option<u64>,
+  ) -> Self {
+    debug!(
+      "Quote params: amount in: {}, cmp order is Less {}, target quote: {}",
+      amount_in,
+      cmp_order == std::cmp::Ordering::Less,
+      target_quote.unwrap_or(0)
+    );
+    QuoteParams { amount_in, cmp_order, target_quote }
+  }
+}
+
+// impl QuoteParams {
+//   pub async fn from_swap_result(
+//     swap_result: &SwapResult,
+//     // pool: &ClmmPool,
+//     pool_info: Option<&ClmmSinglePoolInfo>,
+//     min_profit_percent: f64,
+//   ) -> Result<Self> {
+//     // pub async fn get_quote_params(
+//     // &self,
+//     // let pool_info = pool_info.unwrap_or()
+//     let pool_info = match pool_info {
+//       Some(p_info) => p_info,
+//       None => {
+
+//     let pool_info = self
+//       .client
+//       .amm_client()
+//       .fetch_pool_by_id(&swap_result.pool_id)
+//       .await
+//       .context("Failed to fetch pool by ID")?;
+//       }
+//     }
+//     let pool = None;
+//     // ) -> Result<(u64, Ordering)> {
+//     // ) -> Result<(QuoteParams, ClmmSinglePoolInfo)> {
+//     let mint_a_address = pool.mint_a.address.clone();
+//     debug!("Pool mint A address: {}", mint_a_address);
+
+//     if mint_a_address == swap_result.input_mint.to_string() {
+//       debug!("Mint A IS input mint");
+//       // return Ok((swap_result.amount_in, Less));
+//       let target_quote = Some(
+//         (swap_result.amount_out as f64
+//           / min_profit_percent) as u64,
+//       );
+//       return Ok((
+//         QuoteParams {
+//           amount_in: swap_result.amount_in,
+//           cmp_order: Less,
+//           target_quote,
+//         },
+//         pool_info,
+//       ));
+//     } else {
+//       debug!("Mint A is NOT input mint");
+//       let target_quote = Some(
+//         (swap_result.amount_in as f64
+//           * min_profit_percent) as u64,
+//       );
+//       // return Ok((swap_result.amount_out, Greater));
+//       return Ok((
+//         QuoteParams {
+//           amount_in: swap_result.amount_out,
+//           cmp_order: Greater,
+//           target_quote,
+//         },
+//         pool_info,
+//       ));
+//     };
+//   }
+// }
