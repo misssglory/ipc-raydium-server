@@ -29,8 +29,8 @@ use tokio::{sync::RwLock, task, time::sleep};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-  amm::client::RpcPoolInfo, client::SwapClient, config::SwapConfig,
-  types::SwapResult,
+  QuoteParams, amm::client::RpcPoolInfo, client::SwapClient,
+  config::SwapConfig, types::SwapResult,
 };
 use spl_associated_token_account::{
   get_associated_token_address, instruction::create_associated_token_account,
@@ -46,6 +46,9 @@ use std::cmp::Ordering::{Equal, Greater, Less};
 pub struct SwapExecutor {
   client: Arc<SwapClient>,
   config: Arc<RwLock<SwapConfig>>,
+  pool_id: Option<Pubkey>,
+  pool_info: Option<Arc<ClmmSinglePoolInfo>>,
+  pool: Option<Arc<ClmmPool>>,
 }
 
 impl SwapExecutor {
@@ -53,6 +56,9 @@ impl SwapExecutor {
     SwapExecutor {
       client: Arc::new(client),
       config: Arc::new(RwLock::new(config)),
+      pool_id: None,
+      pool_info: None,
+      pool: None,
     }
   }
 
@@ -60,13 +66,15 @@ impl SwapExecutor {
     client: Arc<SwapClient>,
     config: Arc<RwLock<SwapConfig>>,
   ) -> Self {
-    SwapExecutor { client, config }
+    SwapExecutor { client, config, pool_id: None, pool_info: None, pool: None }
   }
 
-  pub async fn config_mut(
-    &self,
-  ) -> tokio::sync::RwLockWriteGuard<SwapConfig> {
+  pub async fn config_mut(&self) -> tokio::sync::RwLockWriteGuard<SwapConfig> {
     self.config.write().await
+  }
+
+  pub fn client(&self) -> Arc<SwapClient> {
+    self.client.clone()
   }
 
   pub fn get_post_token_amount_u64(
@@ -207,7 +215,7 @@ impl SwapExecutor {
     let input_mint = input_mint.unwrap_or(&config.input_mint);
     let amount_in = amount_in.unwrap_or(config.amount_in);
     info!("Input: {} -> Output: {}", input_mint, output_mint);
-    info!("Amount in: {}, Slippage: {}%", amount_in, config.slippage * 100.0);
+    info!("Amount in: {}, Slippage: {} %", amount_in, config.slippage * 100.0);
 
     let client = self.client.clone();
 
@@ -398,8 +406,376 @@ impl SwapExecutor {
     Ok(())
   }
 
-  /// Ensure ATA exists or create it with retry logic
+  pub async fn execute_round_trip_with_notification(
+    &self,
+    input_mint: Option<&Pubkey>,
+    output_mint: Option<&Pubkey>,
+    sleep_millis: u64,
+  ) -> Result<()> {
+    let buy =
+      self.execute_swap(input_mint, output_mint, None, None, 0, true).await?;
 
+    let buy = Arc::new(buy);
+    if let Err(err) =
+      SwapExecutor::notify_swap(self.client.clone(), buy.clone()).await
+    {
+      error!("Notify swap error: {}", err);
+    }
+
+    let config = self.config.read().await;
+
+    std::thread::sleep(Duration::from_millis(sleep_millis));
+
+    // let target_quote =
+    // (buy.amount_out as f64 / config.min_profit_percent) as u64;
+    let (mut quote_params, pool_info) = self.get_quote_params(&buy).await?;
+
+    //TODO: Nofity result slippage
+    let quote = self
+      .quote_loop(
+        Some(buy.pool_id),
+        &quote_params,
+        Some(&pool_info),
+        // Some(pool_info),
+        None,
+        None,
+        // Some(quote_amount_in),
+        None,
+        // Some(target_quote),
+        1500,
+        // ordering,
+      )
+      .await;
+
+    quote_params.cmp_order =
+      if quote_params.cmp_order == Less { Greater } else { Less };
+
+    let buy = buy.clone();
+    let sell_result = self
+      .execute_swap(
+        Some(&buy.output_mint),
+        Some(&buy.input_mint),
+        Some(buy.amount_out),
+        Some(buy.pool_id),
+        // buy.amount_out,
+        0,
+        false,
+      )
+      .await?;
+
+    // let client = client.clone();
+    let sell = Arc::new(sell_result);
+    if let Err(err) =
+      SwapExecutor::notify_swap(self.client.clone(), sell.clone()).await
+    {
+      error!("Notify error: {}", err);
+    }
+
+    let target_quote = (buy.amount_out as f64) as u64;
+    //TODO: Nofity result slippage
+    let quote = self
+      .quote_loop(
+        Some(buy.pool_id),
+        &quote_params,
+        Some(&pool_info),
+        None,
+        None,
+        None,
+        1500,
+        // Some(sell.amount_in),
+        // None,
+        // Some(target_quote),
+        // 1500,
+        // ordering,
+      )
+      .await;
+
+    Ok(())
+  }
+
+  pub async fn find_raydium_pool(
+    &self,
+    input_mint: &Pubkey,
+    output_mint: &Pubkey,
+  ) -> Result<Pubkey> {
+    let start = Instant::now();
+
+    info!("Searching for pool with mints: {} -> {}", input_mint, output_mint);
+
+    let all_mint_pools = self
+      .client
+      .amm_client()
+      .fetch_pool_info(
+        &input_mint.to_string(),
+        &output_mint.to_string(),
+        &PoolType::Standard,
+        None,
+        None,
+        None,
+        None,
+      )
+      .await
+      .context("Failed to fetch pool info")?;
+
+    let elapsed = start.elapsed();
+    info!("Pool search completed in {} ms", elapsed.as_millis());
+
+    if all_mint_pools.is_empty() {
+      return Err(anyhow!("No Raydium pool found for token pair"));
+    }
+
+    let first_pool = all_mint_pools.first().context("Pools not found!")?;
+    let pool_id =
+      Pubkey::from_str(&first_pool.id).context("Failed to parse pool ID")?;
+
+    info!("Found pool: {}", pool_id);
+    // self.pool = Some(Arc::new(*first_pool));
+    // self.pool_id = Some(pool_id);
+    Ok(pool_id)
+  }
+
+  async fn wait_for_confirmation(&self, signature: &Signature) -> Result<()> {
+    let timeout = Duration::from_secs(30);
+    let start = Instant::now();
+
+    info!("Waiting for transaction confirmation...");
+
+    while start.elapsed() < timeout {
+      match self.client.rpc_client().get_signature_status(signature).await {
+        Ok(Some(_)) => {
+          info!("Transaction confirmed in {} ms", start.elapsed().as_millis());
+          return Ok(());
+        }
+        _ => sleep(Duration::from_millis(500)).await,
+      }
+    }
+
+    warn!("Transaction not confirmed within timeout");
+    Ok(())
+  }
+
+  pub async fn get_quote_params(
+    &self,
+    swap_result: &SwapResult,
+    // ) -> Result<(u64, Ordering)> {
+  ) -> Result<(QuoteParams, ClmmSinglePoolInfo)> {
+    let pool_info = self
+      .client
+      .amm_client()
+      .fetch_pool_by_id(&swap_result.pool_id)
+      .await
+      .context("Failed to fetch pool by ID")?;
+
+    //TODO: Fix pool ID
+    let mint_a_address =
+      pool_info.data.first().context("No pool found!")?.mint_a.address.clone();
+    debug!("Pool mint A address: {}", mint_a_address);
+
+    if mint_a_address == swap_result.input_mint.to_string() {
+      debug!("Mint A IS input mint");
+      // return Ok((swap_result.amount_in, Less));
+      let target_quote = Some(
+        (swap_result.amount_out as f64
+          / self.config.read().await.min_profit_percent) as u64,
+      );
+      return Ok((
+        QuoteParams {
+          amount_in: swap_result.amount_in,
+          cmp_order: Less,
+          target_quote,
+        },
+        pool_info,
+      ));
+    } else {
+      debug!("Mint A is NOT input mint");
+      let target_quote = Some(
+        (swap_result.amount_in as f64
+          * self.config.read().await.min_profit_percent) as u64,
+      );
+      // return Ok((swap_result.amount_out, Greater));
+      return Ok((
+        QuoteParams {
+          amount_in: swap_result.amount_out,
+          cmp_order: Greater,
+          target_quote,
+        },
+        pool_info,
+      ));
+    };
+  }
+
+  pub async fn quote_loop(
+    &self,
+    pool_id: Option<Pubkey>,
+    // pool_info: Option<&ClmmSinglePoolInfo>,
+    quote_params: &QuoteParams,
+    pool_info: Option<&ClmmSinglePoolInfo>,
+    input_mint: Option<&Pubkey>,
+    output_mint: Option<&Pubkey>,
+    // amount_in: Option<u64>,
+    timelimit_millis: Option<u64>,
+    // target_quote: Option<u64>,
+    poll_period_millis: u64,
+    // cmp_order: Ordering,
+  ) -> Result<u64> {
+    let mut quote; // = if cmp_order == Less { 0 } else { u64::MAX };
+    let config = self.config.read().await;
+    // let amount_in = amount_in.unwrap_or(config.amount_in);
+    // let () = quote_params;
+    let QuoteParams { amount_in, cmp_order, target_quote } = quote_params;
+    let timelimit_millis =
+      timelimit_millis.unwrap_or(config.timelimit_seconds * 1000) as u128;
+
+    let pool_id = match pool_id {
+      Some(p_id) => p_id,
+      None => {
+        let input_mint = input_mint.unwrap_or(&config.input_mint);
+        let output_mint = output_mint.unwrap_or(&config.output_mint);
+        let p_id = self.find_raydium_pool(input_mint, output_mint).await?;
+        p_id
+      }
+    };
+    let start_time = Instant::now();
+    // let (quote_params, pool_info) = self.get_quote_params(buy);
+    //TODO: Fix pool ID
+    let pool_info = match pool_info {
+      Some(p_info) => p_info,
+      None => &self
+        .client
+        .amm_client()
+        .fetch_pool_by_id(&pool_id)
+        .await
+        .context("Failed to fetch pool by ID")?,
+    };
+
+    let cmp = natural();
+    let target_quote = match target_quote {
+      None => {
+        let q = self
+          .get_quote(pool_info, &pool_id, *amount_in, Some(0.0), true)
+          .await?;
+        if *cmp_order == Greater {
+          (q as f64 * self.config.read().await.min_profit_percent) as u64
+        } else {
+          (q as f64 / self.config.read().await.min_profit_percent) as u64
+        }
+      }
+      Some(tq) => *tq,
+    };
+
+    info!("Initial target quote: {}", target_quote);
+
+    loop {
+      let step_time = Instant::now();
+      quote = self
+        .get_quote(&pool_info, &pool_id, *amount_in, Some(0.0), true)
+        .await?;
+
+      if start_time.elapsed().as_millis() > timelimit_millis {
+        info!("Timelimit {} ms reached! Quote: {}", timelimit_millis, quote);
+        // if let Some(tq) = target_quote {
+        // info!("Target: {} Diff: {}", tq, (quote as f64 / tq as f64 - 1.0));
+        // } else {
+        //   info!("No target quote was provided");
+        // }
+        break;
+      }
+
+      // if let Some(tq) = target_quote {
+      info!(
+        "Quote {} Target: {} Diff: {} elapsed: {} ms",
+        quote,
+        target_quote,
+        if *cmp_order == Greater {
+          // quote as f64 / target_quote as f64 - 1.0
+          (quote as f64 - target_quote as f64) / target_quote as f64
+        } else {
+          // target_quote as f64 / quote as f64 - 1.0
+          (target_quote as f64 - quote as f64) / target_quote as f64
+        },
+        start_time.elapsed().as_millis()
+      );
+      if cmp.compare(&quote, &target_quote) == *cmp_order {
+        info!("Target quote reached!");
+        break;
+      }
+      // }
+
+      let elapsed_millis = step_time.elapsed().as_millis() as u64;
+      std::thread::sleep(Duration::from_millis(
+        std::cmp::max(poll_period_millis, elapsed_millis) - elapsed_millis,
+      ));
+    }
+    Ok(quote)
+  }
+
+  /// Get quote for a swap (without executing)
+  pub async fn get_quote(
+    &self,
+    pool_info: &ClmmSinglePoolInfo,
+    pool_id: &Pubkey,
+    amount_in: u64,
+    slippage: Option<f64>,
+    is_in: bool,
+  ) -> Result<u64> {
+    info!("Getting quote for swap");
+
+    let slippage = if let Some(slip) = slippage {
+      slip
+    } else {
+      self.config.read().await.slippage
+    };
+
+    //TODO: iterate over all pools & find pool by ID if provided
+    let first_pool = if let Some(poopool) = pool_info.data.first() {
+      poopool
+    } else {
+      return Err(anyhow!("First pool not found"));
+    };
+
+    self
+      .get_quote_for_pool(first_pool, pool_id, amount_in, slippage, is_in)
+      .await
+  }
+
+  async fn get_quote_for_pool(
+    &self,
+    pool: &ClmmPool,
+    pool_id: &Pubkey,
+    amount_in: u64,
+    slippage: f64,
+    is_in: bool,
+  ) -> Result<u64> {
+    let rpc_data = self
+      .client
+      .amm_client()
+      .get_rpc_pool_info(&pool_id)
+      .await
+      .context("Failed to get RPC pool info")?;
+
+    let compute_result_amount = if is_in {
+      let compute_result = self
+        .client
+        .amm_client()
+        .compute_amount_out(&rpc_data, pool, amount_in, slippage)
+        .context("Failed to compute amount out")?;
+      debug!("Compute result (out): {}", compute_result);
+      compute_result.min_amount_out
+    } else {
+      let compute_result = self
+        .client
+        .amm_client()
+        .compute_amount_in(&rpc_data, pool, amount_in, slippage)
+        .context("Failed to compute amount out")?;
+      debug!("Compute result (in): {}", compute_result);
+      compute_result.max_amount_in
+    };
+    // debug!("{}", compute_result);
+    // Ok(compute_result.min_amount_out)
+    Ok(compute_result_amount)
+  }
+
+  /// Ensure ATA exists or create it with retry logic
   async fn ensure_ata_exists(
     // &self,
     // config: SwapConfig,
@@ -540,274 +916,5 @@ impl SwapExecutor {
     // ClientError()
     // }
     Err(anyhow!("Check balance owner ATA error"))
-  }
-
-  pub async fn execute_round_trip_with_notification(
-    &self,
-    input_mint: Option<&Pubkey>,
-    output_mint: Option<&Pubkey>,
-    sleep_millis: u64,
-  ) -> Result<()> {
-    let buy =
-      self.execute_swap(input_mint, output_mint, None, None, 0, true).await?;
-
-    let buy = Arc::new(buy);
-    if let Err(err) =
-      SwapExecutor::notify_swap(self.client.clone(), buy.clone()).await
-    {
-      error!("Notify swap error: {}", err);
-    }
-
-    let config = self.config.read().await;
-
-    std::thread::sleep(Duration::from_millis(sleep_millis));
-
-    let target_quote =
-      (buy.amount_out as f64 / config.min_profit_percent) as u64;
-    //TODO: Nofity result slippage
-    let quote = self
-      .quote_loop(
-        Some(buy.pool_id),
-        None,
-        None,
-        Some(buy.amount_in),
-        None,
-        Some(target_quote),
-        1500,
-        Less,
-      )
-      .await;
-
-    let buy = buy.clone();
-    let sell_result = self
-      .execute_swap(
-        Some(&buy.output_mint),
-        Some(&buy.input_mint),
-        Some(buy.amount_out),
-        Some(buy.pool_id),
-        // buy.amount_out,
-        0,
-        false,
-      )
-      .await?;
-
-    // let client = client.clone();
-    let sell = Arc::new(sell_result);
-    if let Err(err) =
-      SwapExecutor::notify_swap(self.client.clone(), sell.clone())
-        .await
-    {
-      error!("Notify error: {}", err);
-    }
-
-    let target_quote = (buy.amount_out as f64) as u64;
-    //TODO: Nofity result slippage
-    let quote = self
-      .quote_loop(
-        Some(buy.pool_id),
-        None,
-        None,
-        Some(sell.amount_in),
-        None,
-        Some(target_quote),
-        1500,
-        Greater,
-      )
-      .await;
-
-    Ok(())
-    // match sell_result {
-    //   Ok(sell) => {
-    //     let client = self.client.clone();
-    //     SwapExecutor::notify_swap(client, Arc::new(sell)).await?;
-    //     return Ok(());
-    //   }
-    //   Err(err) => {
-    //     return Err(anyhow!("Round trip sell error: {}", err));
-    //   }
-    // }
-  }
-
-  async fn find_raydium_pool(
-    &self,
-    input_mint: &Pubkey,
-    output_mint: &Pubkey,
-  ) -> Result<Pubkey> {
-    let start = Instant::now();
-
-    info!("Searching for pool with mints: {} -> {}", input_mint, output_mint);
-
-    let all_mint_pools = self
-      .client
-      .amm_client()
-      .fetch_pool_info(
-        &input_mint.to_string(),
-        &output_mint.to_string(),
-        &PoolType::Standard,
-        None,
-        None,
-        None,
-        None,
-      )
-      .await
-      .context("Failed to fetch pool info")?;
-
-    let elapsed = start.elapsed();
-    info!("Pool search completed in {} ms", elapsed.as_millis());
-
-    if all_mint_pools.is_empty() {
-      return Err(anyhow!("No Raydium pool found for token pair"));
-    }
-
-    let first_pool = all_mint_pools.first().unwrap();
-    let pool_id =
-      Pubkey::from_str(&first_pool.id).context("Failed to parse pool ID")?;
-
-    info!("Found pool: {}", pool_id);
-    Ok(pool_id)
-  }
-
-  async fn wait_for_confirmation(&self, signature: &Signature) -> Result<()> {
-    let timeout = Duration::from_secs(30);
-    let start = Instant::now();
-
-    info!("Waiting for transaction confirmation...");
-
-    while start.elapsed() < timeout {
-      match self.client.rpc_client().get_signature_status(signature).await {
-        Ok(Some(_)) => {
-          info!("Transaction confirmed in {} ms", start.elapsed().as_millis());
-          return Ok(());
-        }
-        _ => sleep(Duration::from_millis(500)).await,
-      }
-    }
-
-    warn!("Transaction not confirmed within timeout");
-    Ok(())
-  }
-
-  pub async fn quote_loop(
-    &self,
-    pool_id: Option<Pubkey>,
-    input_mint: Option<&Pubkey>,
-    output_mint: Option<&Pubkey>,
-    amount_in: Option<u64>,
-    timelimit_millis: Option<u64>,
-    target_quote: Option<u64>,
-    poll_period_millis: u64,
-    cmp_order: Ordering,
-  ) -> Result<u64> {
-    let mut quote = 0;
-    let config = self.config.read().await;
-    let amount_in = amount_in.unwrap_or(config.amount_in);
-    let timelimit_millis =
-      timelimit_millis.unwrap_or(config.timelimit_seconds * 1000) as u128;
-
-    let pool_id = match pool_id {
-      Some(p_id) => p_id,
-      None => {
-        let input_mint = input_mint.unwrap_or(&config.input_mint);
-        let output_mint = output_mint.unwrap_or(&config.output_mint);
-        let pid = self.find_raydium_pool(input_mint, output_mint).await?;
-        pid
-      }
-    };
-    let start_time = Instant::now();
-    // let timelimit = std::time::Duration::from_millis(timelimit_millis);
-    let pool_info = self
-      .client
-      .amm_client()
-      .fetch_pool_by_id(&pool_id)
-      .await
-      .context("Failed to fetch pool by ID")?;
-    let cmp = natural();
-    loop {
-      let step_time = Instant::now();
-      quote =
-        self.get_quote(amount_in, Some(0.0), &pool_info, &pool_id).await?;
-
-      if start_time.elapsed().as_millis() > timelimit_millis {
-        info!("Timelimit {} ms reached! Quote: {}", timelimit_millis, quote);
-        if let Some(tq) = target_quote {
-          info!("Target: {} Diff: {}", tq, (quote as f64 / tq as f64 - 1.0));
-        } else {
-          info!("No target quote was provided");
-        }
-        break;
-      }
-
-
-      if let Some(tq) = target_quote {
-        info!(
-          "Quote {} Target: {} Diff: {} elapsed: {} ms",
-          quote,
-          tq,
-          (quote as f64 / tq as f64 - 1.0),
-          start_time.elapsed().as_millis()
-        );
-        if cmp.compare(&quote, &tq) == cmp_order {
-          info!("Target quote reached!");
-          break;
-        }
-      }
-
-      let elapsed_millis = step_time.elapsed().as_millis() as u64;
-      std::thread::sleep(Duration::from_millis(
-        std::cmp::max(poll_period_millis, elapsed_millis) - elapsed_millis,
-      ));
-    }
-    Ok(quote)
-  }
-
-  /// Get quote for a swap (without executing)
-  pub async fn get_quote(
-    &self,
-    amount_in: u64,
-    slippage: Option<f64>,
-    pool_info: &ClmmSinglePoolInfo,
-    // pool_id: Option<&Pubkey>,
-    pool_id: &Pubkey,
-  ) -> Result<u64> {
-    info!("Getting quote for swap");
-
-    let slippage = if let Some(slip) = slippage {
-      slip
-    } else {
-      self.config.read().await.slippage
-    };
-
-    //TODO: iterate over all pools
-    let first_pool = if let Some(poopool) = pool_info.data.first() {
-      poopool
-    } else {
-      return Err(anyhow!("First pool not found"));
-    };
-    // let pool_id = pool_id.unwrap_or(&Pubkey::from_str(&first_pool.id)?);
-    let rpc_data = self
-      .client
-      .amm_client()
-      .get_rpc_pool_info(&pool_id)
-      .await
-      .context("Failed to get RPC pool info")?;
-
-    let compute_result = self
-      .client
-      .amm_client()
-      .compute_amount_out(&rpc_data, first_pool, amount_in, slippage)
-      .context("Failed to compute amount out")?;
-
-    debug!("{}", compute_result);
-    Ok(compute_result.min_amount_out)
-
-    // let compute_result = self
-    //   .client
-    //   .amm_client()
-    //   .compute_amount_in(&pool_data.1, first_pool, amount_in / 1000, slippage)
-    //   .context("Failed to compute amount out")?;
-
-    // debug!("{}", compute_result);
-
-    // Ok(compute_result.max_amount_in)
   }
 }

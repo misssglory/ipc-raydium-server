@@ -1,12 +1,14 @@
-use chrono::Local;
-use ipc_server_rs::SwapExecutor;
+use chrono::{DateTime, Local};
 use ipc_server_rs::hash_cache::HashCache;
 use ipc_server_rs::holders_fetcher::TokenHoldersFetcher;
+use ipc_server_rs::{SwapExecutor, SwapResult};
 use raydium_amm_swap::consts::SOL_MINT;
+use tracing_subscriber::filter::LevelFilter;
 // use ipc_server_rs::pump_swap::PumpSwapExecutor;
 use ipc_server_rs::{client::SwapClient, config::SwapConfig};
 use serde::{Deserialize, Serialize};
 use solana_program::pubkey::Pubkey;
+use solana_signature::Signature;
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::env;
 use std::error::Error;
@@ -81,28 +83,67 @@ async fn extract_spl_token_address(
 
       if hash_cache.insert(address) {
         for i in 0..2 {
-          // let result = executor
-          //   .execute_round_trip_with_notification(
-          //     None,
-          //     found_addresses.first(),
-          //     500,
-          //   )
-          //   .await;
-          // let mut config = executor.config_mut().await;
-          // config.min_profit_percent = 1.0 + (config.min_profit_percent - 1.0) * 2.0;
           let result = executor
-            .quote_loop(
+            .execute_round_trip_with_notification(
               None,
-              Some(&Pubkey::from_str(SOL_MINT).unwrap()),
-              Some(&address),
-              None,
-              None,
-              None,
-              1500,
-              Less,
+              found_addresses.first(),
+              500,
             )
             .await;
-          info!("{:?}", result);
+          let mut config = executor.config_mut().await;
+          config.min_profit_percent =
+            1.0 + (config.min_profit_percent - 1.0) * 2.0;
+
+          // let input_mint = Pubkey::from_str(SOL_MINT).unwrap();
+          // let pool_id =
+          //   executor.find_raydium_pool(&input_mint, &address).await.unwrap();
+
+          // let pool_info = executor
+          //   .client()
+          //   .amm_client()
+          //   .fetch_pool_by_id(&pool_id)
+          //   .await
+          //   // .context("Failed to fetch pool by ID")
+          //   .unwrap();
+
+          // let amount_in = executor.config_mut().await.amount_in;
+          // let amount_out = executor
+          //   .get_quote(&pool_info, &pool_id, amount_in, Some(0.0), false)
+          //   .await
+          //   .unwrap();
+          // info!("Initial amount in: {}", amount_in);
+          // info!("Initial amount out: {}", amount_out);
+          // let mut mock_swap_result = SwapResult {
+          //   signature: Signature::new_unique(),
+          //   input_mint: input_mint,
+          //   output_mint: address,
+          //   pool_id: pool_id,
+          //   amount_in: amount_in,
+          //   amount_out: amount_out,
+          //   jupiter_link: "".to_string(),
+          //   explorer_link: "".to_string(),
+          //   timestamp: DateTime::from_timestamp_secs(17000000).unwrap(),
+          // };
+          // let (mock_quote_params, pool_info) =
+          //   executor.get_quote_params(&mock_swap_result).await.unwrap();
+
+          // // mock_swap_result.amount_out = amount_out;
+
+          // let result = executor
+          //   .quote_loop(
+          //     Some(pool_id),
+          //     &mock_quote_params,
+          //     // Some(&Pubkey::from_str(SOL_MINT).unwrap()),
+          //     Some(&pool_info),
+          //     None,
+          //     None,
+          //     // Some(&address),
+          //     // Some(address),
+          //     None,
+          //     1500,
+          //   )
+          //   .await;
+          // info!("{:?}", result);
         }
       }
       Some(found_addresses[0].to_string())
@@ -182,18 +223,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .unwrap_or_else(|| "app".to_string());
 
   let start_time = Local::now().format("%y%m%d_%H-%M-%S");
-  let file_name = format!("{}_{}.log", binary_name, start_time);
 
+  let file_name = format!("{}_{}", binary_name, start_time);
   let file_appender = tracing_appender::rolling::never("logs", &file_name);
   let (non_blocking_file, _guard) =
     tracing_appender::non_blocking(file_appender);
-
-  let stdout_layer = fmt::Layer::default()
-    .with_target(false)
-    .with_level(true)
-    .with_writer(std::io::stdout)
-    .with_filter(config.log_level);
-
   let file_layer = fmt::Layer::default()
     .with_target(false)
     .with_level(true)
@@ -201,7 +235,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .with_writer(non_blocking_file)
     .with_filter(config.log_level);
 
-  Registry::default().with(stdout_layer).with(file_layer).init();
+  let stdout_layer = fmt::Layer::default()
+    .with_target(false)
+    .with_level(true)
+    .with_writer(std::io::stdout)
+    .with_filter(config.log_level);
+
+  let file_appender_info =
+    tracing_appender::rolling::never("info-logs", &file_name);
+  let (non_blocking_file_info, _guard) =
+    tracing_appender::non_blocking(file_appender_info);
+  let file_layer_info = fmt::Layer::default()
+    .with_target(false)
+    .with_level(true)
+    .with_ansi(false) // Recommended for file logs to avoid raw escape codes
+    .with_writer(non_blocking_file_info)
+    .with_filter(LevelFilter::INFO);
+
+  Registry::default()
+    .with(stdout_layer)
+    .with(file_layer)
+    .with(file_layer_info)
+    .init();
 
   debug!("Amount in: {}", config.amount_in);
 

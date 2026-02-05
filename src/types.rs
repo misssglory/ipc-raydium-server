@@ -1,4 +1,5 @@
 use anyhow::Result;
+use raydium_amm_swap::interface::{ClmmPool, ClmmSinglePoolInfo};
 use solana_sdk::pubkey::Pubkey;
 use solana_signature::Signature;
 
@@ -183,4 +184,12 @@ impl SwapParams {
   ) -> Self {
     SwapParams { input_mint, output_mint, amount_in, slippage }
   }
+}
+
+#[derive(Debug,)]
+pub struct QuoteParams {
+  pub amount_in: u64,
+  pub cmp_order: std::cmp::Ordering,
+  pub target_quote: Option<u64>,
+  // pub pool_info: &ClmmSinglePoolInfo,
 }
