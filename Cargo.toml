@@ -45,6 +45,9 @@ solana-pubkey = "2.4.0"
 anchor-lang = "0.32.1"
 compare = "0.1.0"
 tracing-appender = "0.2.4"
+solana-account = "3.4.0"
+solana-compute-budget-instruction = "3.1.8"
+solana-compute-budget-interface = "3.0.0"
 
 
 [profile.release]
