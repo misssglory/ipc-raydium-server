@@ -46,6 +46,8 @@ pub struct SwapResult {
   pub jupiter_link: String,
   pub explorer_link: String,
   pub timestamp: chrono::DateTime<chrono::Utc>,
+  pub amm_input_mint_reserve: Option<u64>,
+  pub amm_output_mint_reserve: Option<u64>,
 }
 
 impl SwapResult {
@@ -56,6 +58,8 @@ impl SwapResult {
     pool_id: Pubkey,
     amount_in: u64,
     amount_out: u64,
+    amm_input_mint_reserve: Option<u64>,
+    amm_output_mint_reserve: Option<u64>,
   ) -> Self {
     let jupiter_link = format!("https://jup.ag/tokens/{}", output_mint);
     let explorer_link = format!(
@@ -73,6 +77,8 @@ impl SwapResult {
       jupiter_link,
       explorer_link,
       timestamp: chrono::Utc::now(),
+      amm_input_mint_reserve,
+      amm_output_mint_reserve,
     }
   }
 

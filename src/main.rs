@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local};
 use ipc_server_rs::hash_cache::HashCache;
 use ipc_server_rs::holders_fetcher::TokenHoldersFetcher;
+use ipc_server_rs::quoter::Quoter;
 use ipc_server_rs::{SwapExecutor, SwapResult};
 use raydium_amm_swap::consts::SOL_MINT;
 use tracing_subscriber::filter::LevelFilter;
@@ -83,49 +84,92 @@ async fn extract_spl_token_address(
 
       if hash_cache.insert(address) {
         for i in 0..2 {
-          let result = executor
-            .execute_round_trip_with_notification(
-              None,
-              found_addresses.first(),
-              500,
+          // let result = executor
+          //   .execute_round_trip_with_notification(
+          //     None,
+          //     found_addresses.first(),
+          //     500,
+          //   )
+          //   .await;
+          // let mut config = executor.config_mut().await;
+          // config.min_profit_percent =
+          //   1.0 + (config.min_profit_percent - 1.0) * 2.0;
+          // config.timelimit_seconds = config.timelimit_seconds * 4;
+
+          let mut input_mint = Pubkey::from_str(SOL_MINT).unwrap();
+          let mut output_mint = address;
+          let pool_id = executor
+            .find_raydium_pool(&input_mint, &output_mint)
+            .await
+            .unwrap();
+          let pool_info = executor
+            .client()
+            .amm_client()
+            .fetch_pool_by_id(&pool_id)
+            .await
+            // .context("Failed to fetch pool by ID")
+            .unwrap();
+
+          let input_mint_is_a_mint =
+            pool_info.data.first().unwrap().mint_a.address
+              == input_mint.to_string();
+          let fee = pool_info.data.first().unwrap().fee_rate.unwrap();
+          let mut amount_in = executor.config_mut().await.amount_in;
+          let mut amount_out = executor
+            .get_quote(
+              &pool_info,
+              &pool_id,
+              amount_in,
+              Some(0.0),
+              (i % 2 == 1) ^ input_mint_is_a_mint,
             )
-            .await;
-          let mut config = executor.config_mut().await;
-          config.min_profit_percent =
-            1.0 + (config.min_profit_percent - 1.0) * 2.0;
+            .await
+            .unwrap();
+          if i % 2 == 1 {
+            std::mem::swap(&mut input_mint, &mut output_mint);
+            // let tmp = amount_in;
+            // amount_in = (amount_out as f64 * (1.0 + fee)) as u64;
+            // amount_out = (tmp as f64 * (1.0 - fee)) as u64;
+          }
 
-          // let input_mint = Pubkey::from_str(SOL_MINT).unwrap();
-          // let pool_id =
-          //   executor.find_raydium_pool(&input_mint, &address).await.unwrap();
+          info!(
+            "Initial amount in: {} Mint: {}",
+            amount_in,
+            input_mint.to_string()
+          );
+          info!(
+            "Initial amount out: {} Mint: {}",
+            amount_out,
+            output_mint.to_string()
+          );
+          let mut mock_swap_result = SwapResult {
+            signature: Signature::new_unique(),
+            input_mint: input_mint,
+            output_mint: output_mint,
+            pool_id: pool_id,
+            amount_in: amount_in,
+            amount_out: amount_out,
+            jupiter_link: "".to_string(),
+            explorer_link: "".to_string(),
+            timestamp: DateTime::from_timestamp_secs(17000000).unwrap(),
+            amm_input_mint_reserve: None,
+            amm_output_mint_reserve: None,
+          };
 
-          // let pool_info = executor
-          //   .client()
-          //   .amm_client()
-          //   .fetch_pool_by_id(&pool_id)
-          //   .await
-          //   // .context("Failed to fetch pool by ID")
-          //   .unwrap();
+          let quoter = Quoter::new(
+            pool_id,
+            executor.client().clone(),
+            mock_swap_result.input_mint,
+            None,
+          )
+          .await.unwrap();
 
-          // let amount_in = executor.config_mut().await.amount_in;
-          // let amount_out = executor
-          //   .get_quote(&pool_info, &pool_id, amount_in, Some(0.0), false)
-          //   .await
-          //   .unwrap();
-          // info!("Initial amount in: {}", amount_in);
-          // info!("Initial amount out: {}", amount_out);
-          // let mut mock_swap_result = SwapResult {
-          //   signature: Signature::new_unique(),
-          //   input_mint: input_mint,
-          //   output_mint: address,
-          //   pool_id: pool_id,
-          //   amount_in: amount_in,
-          //   amount_out: amount_out,
-          //   jupiter_link: "".to_string(),
-          //   explorer_link: "".to_string(),
-          //   timestamp: DateTime::from_timestamp_secs(17000000).unwrap(),
-          // };
+          // let target_pct = if i % 2 == 0 { 1.01 } else { 0.99 };
+          let target_pct = 1.002;
+          quoter.quote_loop(target_pct, 10000u128).await.unwrap();
+
           // let (mock_quote_params, pool_info) =
-          //   executor.get_quote_params(&mock_swap_result).await.unwrap();
+          //   executor.get_quote_params(&mock_swap_result, true).await.unwrap();
 
           // // mock_swap_result.amount_out = amount_out;
 

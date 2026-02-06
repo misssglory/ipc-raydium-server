@@ -30,7 +30,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
   QuoteParams, amm::client::RpcPoolInfo, client::SwapClient,
-  config::SwapConfig, types::SwapResult,
+  config::SwapConfig, quoter::Quoter, types::SwapResult,
 };
 use spl_associated_token_account::{
   get_associated_token_address, instruction::create_associated_token_account,
@@ -128,6 +128,7 @@ impl SwapExecutor {
   fn balances_to_hashmap(
     balances: &Vec<UiTransactionTokenBalance>,
     owner: &String,
+    // comparator: std::cmp::Eq::
   ) -> HashMap<String, u64> {
     let mut map = HashMap::new();
 
@@ -144,6 +145,7 @@ impl SwapExecutor {
   }
 
   pub fn get_token_balance_deltas(
+    // meta: Arc<UiTransactionStatusMeta>,
     meta: Arc<UiTransactionStatusMeta>,
     owner: &String,
   ) -> HashMap<String, i64> {
@@ -332,47 +334,67 @@ impl SwapExecutor {
         let mut amount_out = amount_out;
         let mut amount_in = amount_in;
 
+        let mut amm_input_mint_reserve = None;
+        let mut amm_output_mint_reserve = None;
         match txr {
           Ok(tx) => {
-            if let Some(meta) = tx.transaction.meta {
-              debug!("Transaction meta:");
-              debug!("Pre token balances: {:?}", meta.pre_token_balances);
-              debug!("Post token balances: {:?}", meta.post_token_balances);
-              debug!("Logs: {:?}", meta.log_messages);
-              debug!("Instructions: {:?}", meta.inner_instructions);
-              let meta_ref = Arc::new(meta);
-              let owner = client.keypair().pubkey().to_string();
-              // let pre_balance = SwapExecutor::get_pre_token_amount_u64(
-              //   meta_ref.clone(),
-              //   owner.clone(),
-              //   output_mint_str.clone(),
-              // )?;
-              // let post_balance = SwapExecutor::get_post_token_amount_u64(
-              //   meta_ref.clone(),
-              //   owner,
-              //   output_mint_str,
-              // )?;
-              // amount_out = post_balance - pre_balance;
-              let balance_deltas = SwapExecutor::get_token_balance_deltas(
-                meta_ref.clone(),
-                &owner,
-              );
-              amount_out = std::cmp::max(
-                *balance_deltas.get(&output_mint.to_string()).unwrap_or(&0),
-                0,
-              ) as u64;
-              amount_in = std::cmp::max(
-                -*balance_deltas.get(&input_mint.to_string()).unwrap_or(&0),
-                0,
-              ) as u64;
-              info!(
-                "Amount out for round trip: {}. Amount in: {}",
-                amount_out, amount_in
-              );
-            }
+            // if let Some(meta) = tx.transaction.meta {
+            let meta = Arc::new(
+              tx.transaction.meta.context("No meta in swap transaction")?,
+            );
+            debug!("Transaction meta:");
+            debug!("Pre token balances: {:?}", meta.pre_token_balances);
+            debug!("Post token balances: {:?}", meta.post_token_balances);
+            debug!("Logs: {:?}", meta.log_messages);
+            debug!("Instructions: {:?}", meta.inner_instructions);
+            // let meta_ref = Arc::new(meta);
+            let owner = client.keypair().pubkey().to_string();
+            // let pre_balance = SwapExecutor::get_pre_token_amount_u64(
+            //   meta_ref.clone(),
+            //   owner.clone(),
+            //   output_mint_str.clone(),
+            // )?;
+            // let post_balance = SwapExecutor::get_post_token_amount_u64(
+            //   meta_ref.clone(),
+            //   owner,
+            //   output_mint_str,
+            // )?;
+            // amount_out = post_balance - pre_balance;
+
+            // if let OptionSerializer::Some(post_token_balances) =
+            //   &meta.post_token_balances
+            // {
+            //   post_token_balances.iter().for_each(|balance| {
+            //     if let OptionSerializer::Some(o) = balance.owner.clone()
+            //       && o != owner
+            //     {}
+            //     // != owner
+            //   });
+            // }
+            let balance_deltas = SwapExecutor::get_token_balance_deltas(
+              // meta_ref.clone(),
+              meta, &owner,
+            );
+            amount_out = std::cmp::max(
+              *balance_deltas.get(&output_mint.to_string()).unwrap_or(&0),
+              0,
+            ) as u64;
+            amount_in = std::cmp::max(
+              -*balance_deltas.get(&input_mint.to_string()).unwrap_or(&0),
+              0,
+            ) as u64;
+            info!(
+              "Amount out for round trip: {}. Amount in: {}",
+              amount_out, amount_in
+            );
+
+            // .iter().for_each(|&x| {});
+            // }
           }
           Err(err) => {
             error!("Tx error: {}", err);
+            // return Err(err);
+            return Err(anyhow!("Tx error!"));
           }
         }
 
@@ -383,6 +405,8 @@ impl SwapExecutor {
           pool_id,
           amount_in,
           amount_out,
+          amm_input_mint_reserve,
+          amm_output_mint_reserve,
         );
 
         Ok(result)
@@ -414,6 +438,9 @@ impl SwapExecutor {
   ) -> Result<()> {
     let buy =
       self.execute_swap(input_mint, output_mint, None, None, 0, true).await?;
+
+    let quoter =
+      Quoter::new(buy.pool_id, self.client.clone(), buy.input_mint, None).await;
 
     let buy = Arc::new(buy);
     if let Err(err) =
