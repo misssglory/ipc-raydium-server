@@ -579,27 +579,32 @@ impl SwapExecutor {
       .context("Failed to fetch pool by ID")?;
 
     //TODO: Fix pool ID
-    let mint_a_address =
-      pool_info.data.first().context("No pool found!")?.mint_a.address.clone();
+    let pool = pool_info.data.first().context("No pool found!")?;
+    let mint_a_address = pool.mint_a.address.clone();
     debug!("Pool mint A address: {}", mint_a_address);
+
+    //TODO: Fix hardcoded fee
+    let amount_in = swap_result.amount_in;
+    let amount_out = (swap_result.amount_out as f64
+      * (1.0 + pool.fee_rate.unwrap_or(0.0))) as u64;
 
     if mint_a_address == swap_result.input_mint.to_string() {
       debug!("Mint A IS input mint");
       // return Ok((swap_result.amount_in, Less));
       let target_quote = if target_higher {
         Some(
-          (swap_result.amount_out as f64
-            / self.config.read().await.min_profit_percent) as u64,
+          (amount_out as f64 / self.config.read().await.min_profit_percent)
+            as u64,
         )
       } else {
         Some(
-          (swap_result.amount_out as f64
-            * self.config.read().await.min_profit_percent) as u64,
+          (amount_out as f64 * self.config.read().await.min_profit_percent)
+            as u64,
         )
       };
       return Ok((
         QuoteParams::new(
-          swap_result.amount_in,
+          amount_in,
           if target_higher { Less } else { Greater },
           target_quote,
         ),
@@ -609,19 +614,19 @@ impl SwapExecutor {
       debug!("Mint A is NOT input mint");
       let target_quote = if target_higher {
         Some(
-          (swap_result.amount_in as f64
-            * self.config.read().await.min_profit_percent) as u64,
+          (amount_in as f64 * self.config.read().await.min_profit_percent)
+            as u64,
         )
       } else {
         Some(
-          (swap_result.amount_in as f64
-            / self.config.read().await.min_profit_percent) as u64,
+          (amount_in as f64 / self.config.read().await.min_profit_percent)
+            as u64,
         )
       };
       // return Ok((swap_result.amount_out, Greater));
       return Ok((
         QuoteParams::new(
-          swap_result.amount_out,
+          amount_out,
           if target_higher { Greater } else { Less },
           target_quote,
         ),

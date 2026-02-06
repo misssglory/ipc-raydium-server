@@ -2,7 +2,7 @@ use anyhow::Result;
 use raydium_amm_swap::interface::{ClmmPool, ClmmSinglePoolInfo};
 use solana_sdk::pubkey::Pubkey;
 use solana_signature::Signature;
-use tracing::debug;
+use tracing::{ info, debug };
 
 #[derive(Debug)]
 pub enum FormatError {
@@ -215,7 +215,7 @@ impl QuoteParams {
     cmp_order: std::cmp::Ordering,
     target_quote: Option<u64>,
   ) -> Self {
-    debug!(
+    info!(
       "Quote params: amount in: {}, cmp order is Less {}, target quote: {}",
       amount_in,
       cmp_order == std::cmp::Ordering::Less,
