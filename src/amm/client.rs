@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::amm::{AmmInstruction, SwapInstructionBaseIn};
 use anchor_spl::memo::spl_memo;
+use anchor_spl::token::spl_token::solana_program::native_token::LAMPORTS_PER_SOL;
 use anyhow::{Context, anyhow};
 use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
@@ -715,14 +716,21 @@ impl AmmSwapClient {
       AccountMeta::new_readonly(self.owner.pubkey(), true),
     ];
 
-    let compute_unit_limit = 250_000;
-    let micro_lamports_per_cu = 10_000;
+    let compute_unit_limit = 100_000;
+    let micro_lamports_per_cu = 200_000;
     let ix = Instruction { program_id: amm_program, accounts, data };
     let cu_limit_ix =
         solana_compute_budget_interface::ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit);
 
     let cu_price_ix =
         solana_compute_budget_interface::ComputeBudgetInstruction::set_compute_unit_price(micro_lamports_per_cu);
+
+    let tip_amount = (0.0005 * LAMPORTS_PER_SOL as f64) as u64;
+    let tip_ix = solana_system_interface::instruction::transfer(
+      &self.owner_pubkey(),
+      &Pubkey::from_str_const("4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE"),
+      tip_amount,
+    );
 
     // let token_2022_program_id =
     //   Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -734,7 +742,15 @@ impl AmmSwapClient {
                 mint_b,                  // mint
                 &spl_token::ID,       // token program (Token-2022)
             );
-      self.send_and_sign_transaction(&[cu_limit_ix, cu_price_ix, create_ata_ix, ix]).await
+      self
+        .send_and_sign_transaction(&[
+          cu_limit_ix,
+          cu_price_ix,
+          create_ata_ix,
+          ix,
+          tip_ix,
+        ])
+        .await
     } else {
       self.send_and_sign_transaction(&[cu_limit_ix, cu_price_ix, ix]).await
     }
