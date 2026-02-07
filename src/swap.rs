@@ -450,30 +450,35 @@ impl SwapExecutor {
     }
 
     let config = self.config.read().await;
+    let target_pct = config.min_profit_percent;
+    let timelimit_millis = config.timelimit_seconds as u128 * 1000;
 
     std::thread::sleep(Duration::from_millis(sleep_millis));
 
     // let target_quote =
     // (buy.amount_out as f64 / config.min_profit_percent) as u64;
-    let (mut quote_params, pool_info) =
-      self.get_quote_params(&buy, true).await?;
+    // let (mut quote_params, pool_info) =
+    //   self.get_quote_params(&buy, true).await?;
 
-    //TODO: Nofity result slippage
-    let quote = self
-      .quote_loop(
-        Some(buy.pool_id),
-        &quote_params,
-        Some(&pool_info),
-        // Some(pool_info),
-        None,
-        None,
-        // Some(quote_amount_in),
-        None,
-        // Some(target_quote),
-        1500,
-        // ordering,
-      )
-      .await;
+    // //TODO: Nofity result slippage
+    // let quote = self
+    //   .quote_loop(
+    //     Some(buy.pool_id),
+    //     &quote_params,
+    //     Some(&pool_info),
+    //     // Some(pool_info),
+    //     None,
+    //     None,
+    //     // Some(quote_amount_in),
+    //     None,
+    //     // Some(target_quote),
+    //     1500,
+    //     // ordering,
+    //   )
+    //   .await;
+    if let Ok(_quoter) = &quoter {
+      _quoter.quote_loop(target_pct, timelimit_millis).await;
+    }
 
     let buy = buy.clone();
     let sell_result = self
@@ -490,43 +495,49 @@ impl SwapExecutor {
 
     // let (quote_params.cmp_order, quote_params.target_quote) =
     //   if quote_params.cmp_order == Less { Greater } else { Less };
-    if quote_params.cmp_order == Less {
-      quote_params.cmp_order = Greater;
-      quote_params.target_quote = Some(0);
-    } else {
-      quote_params.cmp_order = Less;
-      quote_params.target_quote = Some(0);
-    }
+    // if quote_params.cmp_order == Less {
+    //   quote_params.cmp_order = Greater;
+    //   quote_params.target_quote = Some(0);
+    // } else {
+    //   quote_params.cmp_order = Less;
+    //   quote_params.target_quote = Some(0);
+    // }
 
     // let client = client.clone();
     let sell = Arc::new(sell_result);
+    let quoter =
+      Quoter::new(sell.pool_id, self.client.clone(), sell.input_mint, None).await;
     if let Err(err) =
       SwapExecutor::notify_swap(self.client.clone(), sell.clone()).await
     {
       error!("Notify error: {}", err);
     }
-
+    
     std::thread::sleep(Duration::from_millis(sleep_millis));
+    if let Ok(_quoter) = &quoter {
+      _quoter.quote_loop( target_pct * 0.8, timelimit_millis).await;
+    }
 
-    let (quote_params, pool_info) = self.get_quote_params(&sell, true).await?;
+    // let (quote_params, pool_info) = self.get_quote_params(&sell, true).await?;
     // let target_quote = (buy.amount_out as f64) as u64;
     //TODO: Nofity result slippage
-    let quote = self
-      .quote_loop(
-        Some(buy.pool_id),
-        &quote_params,
-        Some(&pool_info),
-        None,
-        None,
-        None,
-        1500,
-        // Some(sell.amount_in),
-        // None,
-        // Some(target_quote),
-        // 1500,
-        // ordering,
-      )
-      .await;
+    // let quote = self
+    //   .quote_loop(
+    //     Some(buy.pool_id),
+    //     &quote_params,
+    //     Some(&pool_info),
+    //     None,
+    //     None,
+    //     None,
+    //     1500,
+    //     // Some(sell.amount_in),
+    //     // None,
+    //     // Some(target_quote),
+    //     // 1500,
+    //     // ordering,
+    //   )
+    //   .await;
+
 
     Ok(())
   }

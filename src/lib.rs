@@ -7,6 +7,8 @@ pub mod holders_fetcher;
 pub mod amm;
 pub mod hash_cache;
 pub mod quoter;
+pub mod handlers;
+// pub mod jupyter_swap;
 
 pub use config::*;
 pub use swap::*;
